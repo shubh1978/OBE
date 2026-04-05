@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OBE Analytics · KR Mangalam</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg:#f4f5f7; --bg-card:#fff; --bg-header:#0f172a;
+  --accent:#3b5bdb; --accent2:#5c7cfa;
+  --success:#12b886; --warn:#f59f00; --danger:#f03e3e;
+  --text:#1e293b; --text-2:#475569; --text-3:#94a3b8;
+  --border:#e2e8f0; --radius:10px;
+  --shadow:0 1px 3px rgba(0,0,0,.08),0 4px 12px rgba(0,0,0,.04);
+  --font:'DM Sans',sans-serif; --mono:'DM Mono',monospace;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.5;min-height:100vh}
+select,input,button{font-family:inherit}
+.hidden{display:none!important}
+
+/* HEADER */
+.header{background:var(--bg-header);color:#fff;padding:0 28px;height:56px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;box-shadow:0 1px 0 rgba(255,255,255,.06)}
+.header-brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;letter-spacing:-.2px}
+.header-brand i{color:var(--accent2);font-size:18px}
+.header-user{display:flex;align-items:center;gap:8px;font-size:13px;color:#94a3b8}
+.avatar{width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:600;font-size:12px}
+
+/* FILTER BAR */
+.filter-bar{background:var(--bg-card);border-bottom:1px solid var(--border);padding:12px 28px;display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+.fg{display:flex;flex-direction:column;gap:3px}
+.fg label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text-3)}
+.fg select{padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:var(--bg);color:var(--text);cursor:pointer;transition:border-color .15s,box-shadow .15s;min-width:155px}
+.fg select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,91,219,.12)}
+.fg select:disabled{opacity:.45;cursor:not-allowed}
+
+/* TABS */
+.tab-bar{background:var(--bg-card);border-bottom:1px solid var(--border);padding:0 28px;display:flex;gap:2px}
+.tab-btn{padding:12px 16px;border:none;background:none;font-size:13px;font-weight:500;color:var(--text-2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s,border-color .15s;display:flex;align-items:center;gap:6px}
+.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-btn:hover:not(.active){color:var(--text)}
+
+/* MAIN */
+.main{padding:24px 28px;max-width:1400px;margin:0 auto}
+
+/* EMPTY STATE */
+.empty-state{text-align:center;padding:80px 20px;color:var(--text-3)}
+.empty-state i{font-size:40px;margin-bottom:16px;opacity:.4;display:block}
+.empty-state h3{font-size:18px;color:var(--text-2);margin-bottom:6px}
+
+/* KPI */
+.kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:20px}
+.kpi{background:var(--bg-card);border-radius:var(--radius);padding:16px 18px;display:flex;align-items:center;gap:14px;box-shadow:var(--shadow);border:1px solid var(--border)}
+.kpi-icon{width:40px;height:40px;border-radius:8px;display:grid;place-items:center;font-size:16px;flex-shrink:0}
+.kpi-icon.blue{background:#eff6ff;color:#3b82f6}
+.kpi-icon.green{background:#f0fdf4;color:var(--success)}
+.kpi-icon.orange{background:#fffbeb;color:var(--warn)}
+.kpi-icon.red{background:#fef2f2;color:var(--danger)}
+.kpi-icon.purple{background:#f5f3ff;color:#7c3aed}
+.kpi-val{font-size:24px;font-weight:700;line-height:1;letter-spacing:-.5px}
+.kpi-label{font-size:11px;color:var(--text-3);margin-top:3px;font-weight:500}
+
+/* CHARTS */
+.chart-grid{display:grid;grid-template-columns:1fr 300px;gap:14px;margin-bottom:20px}
+.card{background:var(--bg-card);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow);border:1px solid var(--border)}
+.card-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-3);margin-bottom:14px}
+.chart-wrap{position:relative;height:220px}
+
+/* COURSE CARDS */
+.course-card{background:var(--bg-card);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow);margin-bottom:12px;overflow:hidden}
+.course-header{padding:14px 18px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;transition:background .1s}
+.course-header:hover{background:var(--bg)}
+.course-code{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--accent);background:#eff6ff;padding:2px 8px;border-radius:5px;margin-right:10px;flex-shrink:0}
+.course-name{font-weight:600;font-size:14px}
+.course-meta{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.badge-green{background:#f0fdf4;color:#15803d}
+.badge-yellow{background:#fffbeb;color:#92400e}
+.badge-red{background:#fef2f2;color:#991b1b}
+.course-body{padding:0 18px 16px;border-top:1px solid var(--border);display:none}
+.course-body.open{display:block}
+.co-list{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+.co-row{display:flex;align-items:center;gap:10px}
+.co-label{font-family:var(--mono);font-size:11px;width:100px;flex-shrink:0;color:var(--text-2)}
+.co-desc{font-size:11px;color:var(--text-3);width:200px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.co-bar-wrap{flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden}
+.co-bar{height:100%;border-radius:4px;transition:width .6s ease}
+.co-pct{font-size:12px;font-weight:600;width:40px;text-align:right;flex-shrink:0}
+
+/* DATA CARDS */
+.data-card{background:var(--bg-card);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow);margin-bottom:14px;overflow:hidden}
+.data-card-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.data-card-title{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px}
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{padding:9px 12px;background:var(--bg);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);text-align:center;white-space:nowrap}
+th:first-child{text-align:left}
+td{padding:10px 12px;border-top:1px solid var(--border);vertical-align:middle;text-align:center}
+td:first-child{text-align:left}
+tr:hover td{background:var(--bg)}
+.score-pill{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;font-size:12px;font-weight:600}
+.s3{background:#f0fdf4;color:#15803d}.s2{background:#fffbeb;color:#92400e}.s1{background:#fff7ed;color:#c2410c}.s0{background:var(--bg);color:var(--text-3)}
+.co-pct-cell{font-weight:600}
+.co-pct-cell.low{color:var(--danger)}
+
+/* UPLOAD */
+.upload-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.upload-card{background:var(--bg-card);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow);padding:22px}
+.upload-card h3{font-size:15px;margin-bottom:4px}
+.upload-card p{color:var(--text-3);font-size:12.5px;margin-bottom:16px;line-height:1.6}
+.drop-zone{border:2px dashed var(--border);border-radius:8px;padding:28px 16px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s}
+.drop-zone:hover,.drop-zone.over{border-color:var(--accent);background:#f0f4ff}
+.drop-zone i{font-size:28px;color:var(--text-3);margin-bottom:8px;display:block}
+.drop-zone p{font-size:13px;font-weight:500;margin-bottom:2px;color:var(--text-2)}
+.drop-zone small{color:var(--text-3);font-size:11px}
+.btn-primary{background:var(--accent);color:#fff;border:none;padding:9px 18px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;transition:background .15s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary:hover:not(:disabled){background:#2f4ac7}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.upload-result{margin-top:12px;padding:10px 14px;border-radius:7px;font-size:13px;line-height:1.8;display:none}
+.upload-result.success{background:#f0fdf4;color:#166534;border:1px solid #bbf7d0;display:block}
+.upload-result.error{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;display:block}
+.override-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.override-row label{font-size:11px;font-weight:600;color:var(--text-3);display:block;margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px}
+.override-row select,.override-row input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:var(--bg);color:var(--text)}
+
+/* SPINNER */
+.spin{display:inline-block;width:13px;height:13px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-brand"><i class="fas fa-chart-bar"></i> OBE Analytics System</div>
+  <div class="header-user">
+    <i class="fas fa-circle" style="font-size:7px;color:#22c55e"></i> Connected
+    <div class="avatar">JK</div>
+    <span>Dr. Jyoti Kataria</span>
+  </div>
+</header>
+
+<div class="filter-bar">
+  <div class="fg"><label>Programme</label>
+    <select id="sel_prog" onchange="onProgChange()"><option value="">-- Select Programme --</option></select></div>
+  <div class="fg"><label>Batch</label>
+    <select id="sel_batch" onchange="onBatchChange()" disabled><option value="">-- All Batches --</option></select></div>
+  <div class="fg"><label>Specialization</label>
+    <select id="sel_spec" onchange="onSpecChange()" disabled><option value="">-- Select Specialization --</option></select></div>
+  <div class="fg"><label>Semester</label>
+    <select id="sel_sem" onchange="onSemChange()" disabled><option value="">-- Select Semester --</option></select></div>
+  <div class="fg"><label>Course <span style="font-weight:400;font-size:9px">(optional)</span></label>
+    <select id="sel_course_filter" onchange="onCourseFilterChange()" disabled><option value="">-- All Courses --</option></select></div>
+</div>
+
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('dashboard',this)"><i class="fas fa-th-large"></i> Dashboard</button>
+  <button class="tab-btn" onclick="switchTab('mapping',this)"><i class="fas fa-project-diagram"></i> CO-PO Mapping</button>
+  <button class="tab-btn" onclick="switchTab('students',this)"><i class="fas fa-users"></i> Student Performance</button>
+  <button class="tab-btn" onclick="switchTab('upload',this)"><i class="fas fa-cloud-upload-alt"></i> Upload Data</button>
+  <button class="tab-btn" onclick="switchTab('verify',this)"><i class="fas fa-clipboard-check"></i> Verify Structure</button>
+  <button class="tab-btn" onclick="switchTab('admin',this)"><i class="fas fa-user-shield"></i> Admin Panel</button>
+</div>
+
+<div class="main">
+
+  <div id="empty-state">
+    <div class="empty-state">
+      <i class="fas fa-sliders-h"></i>
+      <h3>Select filters to begin</h3>
+      <p>Choose a Programme and Semester to view OBE analytics.</p>
+    </div>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="view-dashboard" class="hidden">
+    <div class="kpi-grid">
+      <div class="kpi"><div class="kpi-icon blue"><i class="fas fa-book-open"></i></div><div><div class="kpi-val" id="kpi-courses">—</div><div class="kpi-label">Courses with Marks</div></div></div>
+      <div class="kpi"><div class="kpi-icon green"><i class="fas fa-check-circle"></i></div><div><div class="kpi-val" id="kpi-attainment">—</div><div class="kpi-label">Avg CO Attainment</div></div></div>
+      <div class="kpi"><div class="kpi-icon purple"><i class="fas fa-project-diagram"></i></div><div><div class="kpi-val" id="kpi-po">—</div><div class="kpi-label">Avg PO Attainment</div></div></div>
+      <div class="kpi"><div class="kpi-icon orange"><i class="fas fa-user-graduate"></i></div><div><div class="kpi-val" id="kpi-students">—</div><div class="kpi-label">Students Evaluated</div></div></div>
+      <div class="kpi"><div class="kpi-icon red"><i class="fas fa-exclamation-triangle"></i></div><div><div class="kpi-val" id="kpi-risk">—</div><div class="kpi-label">At Risk (&lt;40%)</div></div></div>
+    </div>
+    <div class="chart-grid">
+      <div class="card"><div class="card-title">CO Attainment vs Target (60%)</div><div class="chart-wrap"><canvas id="barChart"></canvas></div></div>
+      <div class="card"><div class="card-title">Attainment Distribution</div><div class="chart-wrap"><canvas id="pieChart"></canvas></div></div>
+    </div>
+    <div id="course-list"></div>
+  </div>
+
+  <!-- MAPPING -->
+  <div id="view-mapping" class="hidden">
+    <div id="mapping-content"></div>
+  </div>
+
+  <!-- STUDENTS -->
+  <div id="view-students" class="hidden">
+    <div class="fg" style="max-width:320px;margin-bottom:16px">
+      <label>Select Course</label>
+      <select id="sel_course" onchange="loadStudents()"><option value="">-- Select a Course --</option></select>
+    </div>
+    <div id="students-content"></div>
+  </div>
+
+  <!-- VERIFY -->
+  <div id="view-verify" class="hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <h2 style="font-size:16px;font-weight:700;margin-bottom:2px">Verify Import</h2>
+        <p style="color:var(--text-3);font-size:13px">Upload your filled Excel to compare what you entered vs what was saved to the database.</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="btn-primary" onclick="document.getElementById('verifyInput').click()" style="background:var(--success)">
+          <i class="fas fa-file-excel"></i> Upload Excel to Verify
+        </button>
+        <button class="btn-primary" onclick="loadVerify()" style="background:var(--text-2)">
+          <i class="fas fa-sync"></i> Verify from DB only
+        </button>
+      </div>
+    </div>
+    <input type="file" id="verifyInput" accept=".xlsx" style="display:none" onchange="verifyExcel(event)">
+    <div id="verify-content">
+      <div style="text-align:center;padding:40px;color:var(--text-3)">
+        <i class="fas fa-clipboard-check" style="font-size:32px;opacity:.3;display:block;margin-bottom:12px"></i>
+        Upload your filled OBE_Structure_Template.xlsx to verify the import, or click "Verify from DB only" to see what's currently in the database.
+      </div>
+    </div>
+  </div>
+
+  <!-- UPLOAD -->
+  <div id="view-upload" class="hidden">
+    <div class="upload-grid">
+      <div class="upload-card">
+        <h3>📊 Upload Mark Sheets</h3>
+        <p>Upload a ZIP file containing Excel (.xlsx) mark sheets. Files should be named <code>COURSECODE_name_type.xlsx</code>. Supports end_term and mid_term files.</p>
+        <div class="drop-zone" id="zipZone" onclick="document.getElementById('zipInput').click()"
+             ondragover="event.preventDefault();this.classList.add('over')"
+             ondragleave="this.classList.remove('over')"
+             ondrop="handleDrop(event,'zipInput')">
+          <i class="fas fa-file-zipper"></i>
+          <p id="zipLabel">Click or drag ZIP file here</p>
+          <small>.zip containing .xlsx files</small>
+        </div>
+        <input type="file" id="zipInput" accept=".zip" style="display:none" onchange="onZipSelect(event)">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+          <button class="btn-primary" id="zipBtn" onclick="uploadZip()" disabled><i class="fas fa-upload"></i> Upload</button>
+          <span id="zipName" style="font-size:12px;color:var(--text-3)"></span>
+        </div>
+        <div class="upload-result" id="zipResult"></div>
+      </div>
+
+      <div class="upload-card" style="grid-column:1/-1; border-top:3px solid var(--accent);">
+        <h3>⚙️ Upload OBE Structure (Recommended First Step)</h3>
+        <p>Fill in the <strong>OBE_Structure_Template.xlsx</strong> and upload it here. This creates all programmes, batches, semesters, courses, COs, POs, PSOs and CO-PO mappings in one shot — no PDF parsing needed.</p>
+        <div style="display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center;">
+          <div class="drop-zone" id="structZone" onclick="document.getElementById('structInput').click()"
+               ondragover="event.preventDefault();this.classList.add('over')"
+               ondragleave="this.classList.remove('over')"
+               ondrop="handleDrop(event,'structInput')" style="padding:16px;">
+            <i class="fas fa-file-excel" style="color:#16a34a"></i>
+            <p id="structLabel">Click or drag OBE_Structure_Template.xlsx</p>
+            <small>.xlsx file only</small>
+          </div>
+        </div>
+        <input type="file" id="structInput" accept=".xlsx" style="display:none" onchange="onStructSelect(event)">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+          <button class="btn-primary" id="structBtn" onclick="uploadStruct()" disabled style="background:var(--success)">
+            <i class="fas fa-database"></i> Create All Entities
+          </button>
+          <span id="structName" style="font-size:12px;color:var(--text-3)"></span>
+        </div>
+        <div class="upload-result" id="structResult"></div>
+      </div>
+
+      <div class="upload-card">
+        <h3>📘 Upload NBA Handbook</h3>
+        <p>Parse a programme handbook PDF to automatically extract courses, COs, POs, PSOs and CO-PO mappings. Use overrides if auto-detection gives wrong results.</p>
+        <div class="override-row">
+          <div>
+            <label>Programme Override <span style="font-weight:400">(optional)</span></label>
+            <select id="pdfProgOverride">
+              <option value="">Auto-detect</option>
+              <option>BCA</option><option>BTech</option><option>BSc</option>
+              <option>MCA</option><option>MTech</option>
+            </select>
+          </div>
+          <div>
+            <label>Batch Start Year <span style="font-weight:400">(optional)</span></label>
+            <input type="number" id="pdfBatchYear" placeholder="e.g. 2023" min="2020" max="2030">
+          </div>
+        </div>
+        <div class="drop-zone" id="pdfZone" onclick="document.getElementById('pdfInput').click()"
+             ondragover="event.preventDefault();this.classList.add('over')"
+             ondragleave="this.classList.remove('over')"
+             ondrop="handleDrop(event,'pdfInput')">
+          <i class="fas fa-file-pdf"></i>
+          <p id="pdfLabel">Click or drag PDF here</p>
+          <small>Programme_Handbook.pdf</small>
+        </div>
+        <input type="file" id="pdfInput" accept=".pdf" style="display:none" onchange="onPdfSelect(event)">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+          <button class="btn-primary" id="pdfBtn" onclick="uploadPdf()" disabled><i class="fas fa-cogs"></i> Parse Handbook</button>
+          <span id="pdfName" style="font-size:12px;color:var(--text-3)"></span>
+        </div>
+        <div class="upload-result" id="pdfResult"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<style>
+/* ADMIN PANEL STYLES */
+.admin-nav-btn { background:none; border:none; color:var(--text-2); padding:6px 12px; font-weight:600; cursor:pointer; font-size:13px; border-bottom:2px solid transparent; transition:all 0.15s; }
+.admin-nav-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+.admin-nav-btn:hover:not(.active) { color:var(--text); }
+.btn-sm { padding:5px 10px; font-size:12px; border-radius:5px; font-weight:600; border:none; cursor:pointer; }
+.btn-save { background:var(--success); color:#fff; }
+.btn-save:hover { background:#16a34a; }
+.btn-edit { background:#f1f5f9; color:var(--text-2); border:1px solid #cbd5e1; }
+.btn-edit:hover { background:#e2e8f0; color:var(--text); }
+.btn-delete { background:#fef2f2; color:var(--danger); border:1px solid #fecaca; }
+.btn-delete:hover { background:#fee2e2; }
+.admin-form { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; align-items:center; }
+.admin-form input, .admin-form select { padding:6px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; }
+.matrix-container { max-width:100%; overflow-x:auto; }
+.matrix-cell { width:28px; height:28px; padding:0; text-align:center; font-weight:600; border-radius:4px; border:1px solid var(--border); background:#fff; cursor:pointer; font-size:12px; }
+.matrix-cell.w1 { background:#f0fdf4; color:#16a34a; border-color:#bbf7d0; }
+.matrix-cell.w2 { background:#fef08a; color:#ca8a04; border-color:#fde047; }
+.matrix-cell.w3 { background:#fef2f2; color:#dc2626; border-color:#fecaca; }
+</style>
+
+  <!-- ADMIN -->
+  <div id="view-admin" class="hidden">
+    <div style="display:flex; gap: 4px; border-bottom:1px solid var(--border); margin-bottom:16px; flex-wrap:wrap;">
+      <button class="admin-nav-btn active" onclick="adminSection('programs',this)">Programs</button>
+      <button class="admin-nav-btn" onclick="adminSection('batches',this)">Batches</button>
+      <button class="admin-nav-btn" onclick="adminSection('semesters',this)">Semesters</button>
+      <button class="admin-nav-btn" onclick="adminSection('courses',this)">Courses</button>
+      <button class="admin-nav-btn" onclick="adminSection('cos',this)">COs</button>
+      <button class="admin-nav-btn" onclick="adminSection('pos',this)">POs</button>
+      <button class="admin-nav-btn" onclick="adminSection('psos',this)">PSOs</button>
+      <button class="admin-nav-btn" onclick="adminSection('copo',this)">CO-PO</button>
+      <button class="admin-nav-btn" onclick="adminSection('copso',this)">CO-PSO</button>
+    </div>
+    <div id="admin-content">
+      <div class="data-card" style="padding:20px;text-align:center;color:var(--text-3)">Select an entity above to manage data.</div>
+    </div>
+  </div>
+
+<script src="script.js"></script>
+</body>
+</html>
