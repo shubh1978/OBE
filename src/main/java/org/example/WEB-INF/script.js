@@ -1,5 +1,5 @@
 // ═══ CONFIG ═══════════════════════════════════════════════════
-const API = 'http://localhost:8080';
+const API = 'https://obe-backend-qf77.onrender.com';
 
 // ═══ STATE ════════════════════════════════════════════════════
 const S = { programId: null, batchYear: null, specId: null, semesterId: null, courseFilter: null, data: null };
