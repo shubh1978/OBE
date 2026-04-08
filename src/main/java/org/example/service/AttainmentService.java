@@ -11,8 +11,11 @@ import java.util.*;
 @RequiredArgsConstructor
 public class AttainmentService {
 
-    private static final double ATTAINMENT_THRESHOLD = 40.0;  // 40% threshold for CO
-    // CO Level thresholds: >40% of students passing -> Level 1, >60% -> Level 2, >80% -> Level 3
+    private static final double ATTAINMENT_THRESHOLD = 40.0;  // 40% threshold for CO scoring
+    // CO Level thresholds (minimum level is always 1 — Level 0 does NOT exist):
+    //  >= 80% of students passing -> Level 3
+    //  >= 60% of students passing -> Level 2
+    //  anything else              -> Level 1 (including < 40%)
     private static final double LEVEL2_THRESHOLD = 60.0;
     private static final double LEVEL3_THRESHOLD = 80.0;
     private static final double PO_SCALE = 3.0;  // CO level scale 0-3
@@ -198,17 +201,42 @@ public class AttainmentService {
     }
 
     /**
-     * Converts a CO passing-percentage (0-100) to a level (0, 1, 2, or 3).
-     *   > 80% of students passing threshold -> Level 3
-     *   > 60%                               -> Level 2
-     *   > 40%                               -> Level 1
-     *   <= 40%                              -> Level 0
+     * Converts a CO passing-percentage (0-100) to a level (1, 2, or 3).
+     * Minimum level is always 1 — Level 0 does NOT exist.
+     *   >= 80% of students passing threshold -> Level 3
+     *   >= 60%                               -> Level 2
+     *   anything else (including < 40%)      -> Level 1
      */
     private double percentToLevel(double passingPercent) {
-        if (passingPercent > LEVEL3_THRESHOLD) return 3.0;
-        if (passingPercent > LEVEL2_THRESHOLD) return 2.0;
-        if (passingPercent > ATTAINMENT_THRESHOLD) return 1.0;
-        return 0.0;
+        if (passingPercent >= LEVEL3_THRESHOLD) return 3.0;
+        if (passingPercent >= LEVEL2_THRESHOLD) return 2.0;
+        return 1.0; // minimum level — even if < 40% pass, CO still contributes Level 1
+    }
+
+    /**
+     * Get CO attainment levels (1-3) for each CO in a course.
+     * Level 1: Fewer than 60% students achieved >= 40% of CO marks (minimum level, never 0)
+     * Level 2: >= 60% students achieved >= 40% of CO marks
+     * Level 3: >= 80% students achieved >= 40% of CO marks
+     *
+     * @param courseId Course ID
+     * @return Map of CO code -> level (1-3)
+     */
+    public Map<String, Integer> getCOLevels(Long courseId) {
+        Map<String, Double> coAttainments = calculateCOAttainment(courseId);
+        Map<String, Integer> levels = new LinkedHashMap<>();
+        for (Map.Entry<String, Double> entry : coAttainments.entrySet()) {
+            levels.put(entry.getKey(), (int) percentToLevel(entry.getValue()));
+        }
+        return levels;
+    }
+
+    /**
+     * Get the total number of distinct students who have marks for this course.
+     */
+    public int getStudentCount(Long courseId) {
+        List<StudentMark> marks = studentMarkRepository.findByCourseId(courseId);
+        return (int) marks.stream().map(m -> m.getStudent().getId()).distinct().count();
     }
 
     /**

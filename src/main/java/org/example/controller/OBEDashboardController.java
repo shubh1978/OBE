@@ -36,7 +36,7 @@ public class OBEDashboardController {
             try {
                 int sy = b.getStartYear();
                 int ey; try { ey = b.getEndYear(); } catch (Exception e2) { ey = sy + 3; }
-                if (sy > 0) startToEnd.merge(sy, ey > 0 ? ey : sy + 3, Math::max);
+                if (sy > 0) startToEnd.merge(sy, ey > 0 ? ey : sy + 3, (a, bv) -> Math.max(a, bv));
             } catch (Exception ignored) {}
         }
         List<Map<String, Object>> batches = new ArrayList<>();
@@ -74,6 +74,14 @@ public class OBEDashboardController {
         Program prog = programRepository.findById(programId).orElse(null);
         if (prog == null) return ResponseEntity.ok(List.of());
         List<Batch> batches = batchRepository.findByProgram(prog);
+        // CRITICAL: filter by specialization FIRST so we get the correct semester IDs.
+        // Each specialization has its own batch with its own semester IDs.
+        // e.g. CSE Sem1=47, FSD Sem1=27 — different batches, different IDs.
+        if (specializationId != null) {
+            batches = batches.stream()
+                    .filter(b -> b.getSpecialization() != null && specializationId.equals(b.getSpecialization().getId()))
+                    .collect(Collectors.toList());
+        }
         if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
             try { int fy = Integer.parseInt(batchYear);
                 batches = batches.stream().filter(b -> { try { return fy == b.getStartYear(); } catch (Exception e) { return false; } }).collect(Collectors.toList());
@@ -103,6 +111,8 @@ public class OBEDashboardController {
         List<Course> courses;
         if (semesterId != null) {
             if (semesterRepository.findById(semesterId).isEmpty()) return ResponseEntity.ok(emptyResult());
+            // semesterId is now specialization-specific (getSemesters filters by spec first),
+            // so this automatically returns only courses in the correct specialization's semester.
             courses = new ArrayList<>(courseRepository.findBySemesterId(semesterId));
         } else {
             courses = getCoursesForFilter(programId, specializationId, batchYear);
@@ -114,6 +124,8 @@ public class OBEDashboardController {
         }
         if (courseCode != null && !courseCode.isBlank())
             courses = courses.stream().filter(c -> courseCode.equalsIgnoreCase(c.getCourseCode())).collect(Collectors.toList());
+        // Dedup: if structure parser still has duplicate entities for same course code, prefer the one with marks
+        courses = deduplicateCourses(courses);
 
         List<Map<String, Object>> courseResults = new ArrayList<>();
         int totalStudents = 0, atRiskCount = 0;
@@ -245,28 +257,48 @@ public class OBEDashboardController {
     @GetMapping("/courses")
     public ResponseEntity<?> getCoursesDropdown(
             @RequestParam(required = false) Long semesterId,
-            @RequestParam(required = false) Long programId,
             @RequestParam(required = false) Long specializationId,
+            @RequestParam(required = false) Long programId,
             @RequestParam(required = false) String batchYear) {
         List<Course> courses = semesterId != null
-                ? courseRepository.findBySemesterId(semesterId)
+                ? new ArrayList<>(courseRepository.findBySemesterId(semesterId))
                 : getCoursesForFilter(programId, specializationId, batchYear);
         if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
             try { int fy = Integer.parseInt(batchYear);
                 courses = courses.stream().filter(c -> c.getBatch() != null && fy == c.getBatch().getStartYear()).collect(Collectors.toList());
             } catch (NumberFormatException ignored) {}
         }
+        // Deduplicate: pick the course entity with most marks when same code appears in multiple specializations
+        courses = deduplicateCourses(courses);
         return ResponseEntity.ok(courses.stream()
-                .map(c -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("id", c.getId()); m.put("code", c.getCourseCode()); m.put("name", c.getCourseName()); return m; })
+                .map(c -> {
+                    long studentCount = studentMarkRepository.findByCourse(c).stream()
+                            .map(sm -> sm.getStudent().getId()).distinct().count();
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id", c.getId());
+                    m.put("code", c.getCourseCode());
+                    m.put("name", c.getCourseName());
+                    m.put("studentCount", (int) studentCount);
+                    return m;
+                })
                 .collect(Collectors.toList()));
     }
 
     @GetMapping("/students")
     public ResponseEntity<?> getStudentPerformance(
-            @RequestParam String courseCode,
+            @RequestParam(required = false) String courseCode,
+            @RequestParam(required = false) Long courseId,
             @RequestParam(required = false) String batchYear) {
-        Course course = courseRepository.findFirstByCourseCode(courseCode).orElse(null);
-        if (course == null) return ResponseEntity.ok(Map.of("error", "Not found: " + courseCode));
+        // Prefer courseId (exact match) over courseCode (may match wrong batch entity)
+        Course course;
+        if (courseId != null) {
+            course = courseRepository.findById(courseId).orElse(null);
+        } else if (courseCode != null) {
+            course = courseRepository.findFirstByCourseCode(courseCode).orElse(null);
+        } else {
+            return ResponseEntity.ok(Map.of("error", "Provide courseId or courseCode"));
+        }
+        if (course == null) return ResponseEntity.ok(Map.of("error", "Course not found"));
         List<StudentMark> marks = new ArrayList<>(studentMarkRepository.findByCourse(course));
         if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
             try { int fy = Integer.parseInt(batchYear);
@@ -275,7 +307,7 @@ public class OBEDashboardController {
         }
         List<CO> cos = new ArrayList<>(coRepository.findByCourse(course));
         cos.sort(Comparator.comparingInt(co -> { try { return Integer.parseInt(extractCoNum(co.getCode())); } catch (Exception e) { return 999; } }));
-        if (marks.isEmpty()) return ResponseEntity.ok(Map.of("courseCode", courseCode, "students", List.of(), "coCodes", List.of()));
+        if (marks.isEmpty()) return ResponseEntity.ok(Map.of("courseCode", course.getCourseCode() != null ? course.getCourseCode() : "", "courseName", course.getCourseName() != null ? course.getCourseName() : "", "students", List.of(), "coCodes", List.of()));
         if (cos.isEmpty()) {
             marks.stream().map(StudentMark::getQuestion)
                     .filter(q -> q != null && q.matches("Q\\d+.*"))
@@ -323,8 +355,18 @@ public class OBEDashboardController {
             Map<String, Double> spa = new LinkedHashMap<>();
             for (PO po : pos) {
                 double ws=0, wt=0;
-                for (CO co : cos) { int w=coPOW.getOrDefault(co.getCode(),Map.of()).getOrDefault(po.getCode(),0); if(w>0){ws+=coAtt.getOrDefault(co.getCode(),0.0)*w;wt+=w;} }
-                spa.put(po.getCode(), wt>0 ? r1(ws/(wt*3.0)*100.0) : 0.0);
+                for (CO co : cos) {
+                    int w = coPOW.getOrDefault(co.getCode(), Map.of()).getOrDefault(po.getCode(), 0);
+                    if (w > 0) {
+                        // Convert individual student's CO % to a level (0-3) using same threshold as AttainmentService
+                        double coPct = coAtt.getOrDefault(co.getCode(), 0.0);
+                        double coLevel = coPct >= 80.0 ? 3.0 : coPct >= 60.0 ? 2.0 : 1.0; // min level is 1
+                        ws += coLevel * w;
+                        wt += w;
+                    }
+                }
+                // Return on 0-3 scale (like course-level PO attainment from AttainmentService)
+                spa.put(po.getCode(), wt > 0 ? r1(ws / wt) : 0.0);
             }
             row.put("poAttainment", spa);
             double overall = totalMax>0 ? Math.min(100.0, r1(totalObt/totalMax*100.0)) : 0;
@@ -332,8 +374,10 @@ public class OBEDashboardController {
             students.add(row);
         }
         students.sort(Comparator.comparing(s -> String.valueOf(s.get("enrollmentNo"))));
-        return ResponseEntity.ok(Map.of("courseCode",course.getCourseCode(),"courseName",course.getCourseName(),
-                "coCodes",coCodes,"poHeaders",pos.stream().map(PO::getCode).collect(Collectors.toList()),"students",students));
+        String finalCode = course.getCourseCode() != null ? course.getCourseCode() : "";
+        String finalName = course.getCourseName() != null ? course.getCourseName() : "";
+        return ResponseEntity.ok(Map.of("courseCode", finalCode, "courseName", finalName,
+                "coCodes", coCodes, "poHeaders", pos.stream().map(PO::getCode).collect(Collectors.toList()), "students", students));
     }
 
     @GetMapping("/verify")
@@ -409,6 +453,42 @@ public class OBEDashboardController {
                 courses=courses.stream().filter(c -> { if(c.getBatch()==null) return false; try { return fy==c.getBatch().getStartYear(); } catch(Exception e){return false;} }).collect(Collectors.toList());
             } catch (NumberFormatException ignored) {}
         return courses;
+    }
+
+    /**
+     * Deduplicates a list of courses by course code, preferring the entity with the most marks.
+     *
+     * GLOBAL FALLBACK: If a course entity in the list has 0 marks, this searches ALL course entities
+     * with the same code in the database to find one that has marks.
+     * This is needed because the structure parser creates one Course entity per specialization
+     * for each course code, but marks were uploaded under only one of those entities (e.g. FSD copy).
+     * The semester-filter gives us the CSE copy (correct code, wrong entity with no marks),
+     * so we replace it with the FSD/null-spec copy that actually has marks.
+     *
+     * NOTE: we preserve the original course's metadata (name, specialization) for display,
+     * only the course entity used for mark/CO/PO lookups changes.
+     */
+    private List<Course> deduplicateCourses(List<Course> courses) {
+        Map<String, Course> best = new LinkedHashMap<>();
+        Map<String, Long> bestCount = new HashMap<>();
+        for (Course c : courses) {
+            String code = c.getCourseCode();
+            if (code == null) continue;
+            long cnt = studentMarkRepository.findByCourse(c).size();
+            // If this entity has no marks, search globally for a better copy
+            if (cnt == 0) {
+                List<Course> allCopies = courseRepository.findAllByCourseCode(code);
+                for (Course alt : allCopies) {
+                    long altCnt = studentMarkRepository.findByCourse(alt).size();
+                    if (altCnt > cnt) { c = alt; cnt = altCnt; }
+                }
+            }
+            if (!best.containsKey(code) || cnt > bestCount.getOrDefault(code, 0L)) {
+                best.put(code, c);
+                bestCount.put(code, cnt);
+            }
+        }
+        return new ArrayList<>(best.values());
     }
 
     private String extractCoNum(String code) {

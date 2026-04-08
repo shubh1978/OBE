@@ -23,6 +23,8 @@ public interface CourseRepository extends JpaRepository<Course, Long> {
     @org.springframework.data.jpa.repository.Query("SELECT c FROM Course c WHERE c.semester.id = :semesterId")
     List<Course> findBySemesterId(@org.springframework.data.repository.query.Param("semesterId") Long semesterId);
     Optional<Course> findFirstByCourseCode(String courseCode);
+    List<Course> findAllByCourseCode(String courseCode);
+
 
     List<Course> findByBatch(org.example.entity.Batch b);
 }

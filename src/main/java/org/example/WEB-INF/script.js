@@ -15,6 +15,8 @@ function rst(id, ph) { const e = document.getElementById(id); e.innerHTML = '<op
 function pct(v) { return (v == null || v === '—') ? '—' : Math.round(v) + '%'; }
 function clr(v) { return v >= 60 ? 'var(--success)' : v >= 40 ? 'var(--warn)' : 'var(--danger)'; }
 function bdg(v) { return v >= 60 ? 'badge-green' : v >= 40 ? 'badge-yellow' : 'badge-red'; }
+function levelClr(lv) { return lv >= 3 ? 'var(--success)' : lv >= 2 ? 'var(--warn)' : lv >= 1 ? '#f59f00' : 'var(--danger)'; }
+function levelBadge(lv) { return '<span style="display:inline-flex;align-items:center;justify-content:center;min-width:52px;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700;background:' + (lv >= 3 ? '#f0fdf4' : lv >= 2 ? '#fffbeb' : lv >= 1 ? '#fff7ed' : '#fef2f2') + ';color:' + levelClr(lv) + ';border:1px solid ' + (lv >= 3 ? '#bbf7d0' : lv >= 2 ? '#fde68a' : lv >= 1 ? '#fed7aa' : '#fecaca') + '">Level ' + lv + '</span>'; }
 
 // ═══ TAB ══════════════════════════════════════════════════════
 function switchTab(name, btn) {
@@ -120,7 +122,7 @@ async function loadDashboard() {
         document.getElementById('view-' + currentTab).classList.remove('hidden');
     }
     try {
-        // ── Step 1: get course list with IDs ─────────────────────
+        // ── Step 1: get course list with IDs (includes studentCount) ─
         let coUrl = '/dashboard/courses?semesterId=' + S.semesterId + '&programId=' + S.programId;
         if (S.specId) coUrl += '&specializationId=' + S.specId;
         if (S.batchYear) coUrl += '&batchYear=' + S.batchYear;
@@ -129,19 +131,21 @@ async function loadDashboard() {
         const filtered = S.courseFilter
             ? courseList.filter(function(c) { return c.code === S.courseFilter; })
             : courseList;
+        const totalAllCourses = filtered.length;
 
-        // ── Step 2: fetch CO, PO, PSO attainment for each course in parallel
+        // ── Step 2: fetch CO, PO, PSO attainment + CO levels for each course
         const attainments = await Promise.all(filtered.map(function(c) {
             return Promise.all([
                 get('/api/attainment/co/' + c.id).catch(function() { return {}; }),
                 get('/api/attainment/po/' + c.id).catch(function() { return {}; }),
                 get('/api/attainment/pso/' + c.id).catch(function() { return {}; }),
                 get('/api/attainment/co-po-mapping/' + c.id).catch(function() { return []; }),
-                get('/api/attainment/co-pso-mapping/' + c.id).catch(function() { return []; })
+                get('/api/attainment/co-pso-mapping/' + c.id).catch(function() { return []; }),
+                get('/api/attainment/co-levels/' + c.id).catch(function() { return {}; })
             ]).then(function(results) {
-                return { co: results[0], po: results[1], pso: results[2], coPoMatrix: results[3], coPsoMatrix: results[4] };
+                return { co: results[0], po: results[1], pso: results[2], coPoMatrix: results[3], coPsoMatrix: results[4], coLevels: results[5] };
             }).catch(function() {
-                return { co: {}, po: {}, pso: {}, coPoMatrix: [], coPsoMatrix: [] };
+                return { co: {}, po: {}, pso: {}, coPoMatrix: [], coPsoMatrix: [], coLevels: {} };
             });
         }));
 
@@ -150,12 +154,18 @@ async function loadDashboard() {
             const coMap = attainments[idx].co || {};
             const poMap = attainments[idx].po || {};
             const psoMap = attainments[idx].pso || {};
-            const target = 60.0;
+            const coLevelMap = attainments[idx].coLevels || {};
+            const target = 40.0;
 
             const coAttainments = Object.entries(coMap).map(function(e) {
-                return { co: e[0], description: e[0], attainment: Math.round(e[1] * 10) / 10, target: target };
+                return {
+                    co: e[0],
+                    description: e[0],
+                    attainment: Math.round(e[1] * 10) / 10,
+                    level: coLevelMap[e[0]] != null ? coLevelMap[e[0]] : null,
+                    target: target
+                };
             }).sort(function(a, b) {
-                // Sort CO1, CO2, CO3... numerically
                 var na = parseInt((a.co.match(/\d+$/) || [0])[0], 10);
                 var nb = parseInt((b.co.match(/\d+$/) || [0])[0], 10);
                 return na - nb;
@@ -172,7 +182,7 @@ async function loadDashboard() {
             });
             const poAttainment = {};
             poHeaders.forEach(function(po) {
-                poAttainment[po] = Math.round(poMap[po] * 100) / 100; // 2 decimal places (e.g. 1.67)
+                poAttainment[po] = Math.round(poMap[po] * 100) / 100;
             });
 
             // PSO attainment: backend returns 0-3 decimal, keep as-is
@@ -187,8 +197,10 @@ async function loadDashboard() {
             });
 
             return {
-                id: c.id, courseCode: c.code, courseName: c.name, studentCount: 0, avgAttainment: avg,
-                coAttainments: coAttainments, examLoaded: false,
+                id: c.id, courseCode: c.code, courseName: c.name,
+                studentCount: c.studentCount != null ? c.studentCount : 0,
+                avgAttainment: avg,
+                coAttainments: coAttainments, coLevels: coLevelMap, examLoaded: false,
                 poHeaders: poHeaders, poAttainment: poAttainment,
                 psoHeaders: psoHeaders, psoAttainment: psoAttainment,
                 coPoMatrix: attainments[idx].coPoMatrix || [], coPsoMatrix: attainments[idx].coPsoMatrix || []
@@ -201,7 +213,7 @@ async function loadDashboard() {
                 / Math.max(1, courses.filter(function(c) { return c.avgAttainment > 0; }).length) * 10) / 10
             : 0;
 
-        // Collect all PO/PSO attainments for branch averages
+        // Collect PO/PSO attainments across courses
         const branchPoAtt = {}, branchPsoAtt = {};
         courses.forEach(function(course) {
             Object.entries(course.poAttainment).forEach(function(e) {
@@ -222,10 +234,15 @@ async function loadDashboard() {
             branchPsoAttainment[e[0]] = Math.round(e[1].reduce(function(a,b) { return a+b; }, 0) / e[1].length * 10) / 10;
         });
 
+        // Total students = sum of distinct students across all courses with marks
+        const totalStudents = courses.reduce(function(sum, c) { return sum + c.studentCount; }, 0);
+        const coursesWithMarks = courses.filter(function(c) { return c.coAttainments.length > 0; }).length;
+
         const d = {
             courses: courses,
-            totalCourses: courses.filter(function(c) { return c.coAttainments.length > 0; }).length,
-            totalStudents: 0,
+            totalCourses: coursesWithMarks,
+            totalAllCourses: totalAllCourses,
+            totalStudents: totalStudents,
             atRiskStudents: 0,
             overallAttainment: overallAtt,
             branchPoAttainment: branchPoAttainment,
@@ -239,93 +256,195 @@ async function loadDashboard() {
 }
 
 // ═══ RENDER DASHBOARD ═════════════════════════════════════════
+const COURSE_PALETTE = ['#3b5bdb','#12b886','#f59f00','#7c3aed','#e64747','#0369a1','#d97706','#0891b2'];
+
 function renderDashboard(d) {
     const courses = d.courses || [];
-    document.getElementById('kpi-courses').textContent = d.totalCourses != null ? d.totalCourses : courses.length;
-    document.getElementById('kpi-attainment').textContent = d.overallAttainment != null ? pct(d.overallAttainment) : '—';
-    document.getElementById('kpi-students').textContent = d.totalStudents != null ? d.totalStudents : '—';
-    document.getElementById('kpi-risk').textContent = d.atRiskStudents != null ? d.atRiskStudents : '—';
-    const pv = Object.values(d.branchPoAttainment || {});
-    document.getElementById('kpi-po').textContent = pv.length ? pct(pv.reduce(function(a, b) { return a + b; }, 0) / pv.length) : '—';
+    // KPI: Courses with Marks as "X / Y"
+    const coursesLabel = (d.totalCourses != null ? d.totalCourses : 0) + ' / ' + (d.totalAllCourses != null ? d.totalAllCourses : courses.length);
+    document.getElementById('kpi-courses').textContent = coursesLabel;
+    document.getElementById('kpi-students').textContent = d.totalStudents != null && d.totalStudents > 0 ? d.totalStudents : '—';
+    // Count at-risk COs (Level 1 with attainment < 40%)
+    const allCOsFlat = [];
+    const courseColorMap = {};
+    courses.forEach(function(c, ci) {
+        courseColorMap[c.courseCode] = COURSE_PALETTE[ci % COURSE_PALETTE.length];
+        (c.coAttainments || []).forEach(function(co) {
+            allCOsFlat.push(Object.assign({}, co, { course: c.courseCode, courseName: c.courseName, courseIdx: ci }));
+        });
+    });
+    const atRisk = allCOsFlat.filter(function(co) { return co.attainment < 40; }).length;
+    document.getElementById('kpi-risk').textContent = atRisk;
 
-    const allCOs = [];
-    courses.forEach(function(c) { (c.coAttainments || []).forEach(function(co) { allCOs.push(Object.assign({}, co, { course: c.courseCode })); }); });
+    // ── Bar chart: one color per course, dashed line for target ────────
     if (barChart) barChart.destroy();
-    if (allCOs.length) {
+    var barWrap = document.getElementById('attainment-table-wrap');
+    if (barWrap) barWrap.innerHTML = ''; // always clear stale content
+
+    if (allCOsFlat.length) {
+        const barColors = allCOsFlat.map(function(c) { return courseColorMap[c.course] || '#3b5bdb'; });
         barChart = new Chart(document.getElementById('barChart'), {
             type: 'bar',
             data: {
-                labels: allCOs.map(function(c) { return c.co; }),
+                labels: allCOsFlat.map(function(c) { return c.co; }),
                 datasets: [
-                    { label: 'Attainment %', data: allCOs.map(function(c) { return c.attainment; }), backgroundColor: allCOs.map(function(c) { return clr(c.attainment); }), borderRadius: 4, order: 1 },
-                    { label: 'Target (60%)', data: Array(allCOs.length).fill(60), backgroundColor: '#e2e8f0', borderRadius: 4, barPercentage: 0.5, order: 2 }
+                    {
+                        label: 'Attainment %',
+                        data: allCOsFlat.map(function(c) { return c.attainment; }),
+                        backgroundColor: barColors,
+                        borderRadius: 4, categoryPercentage: 0.7, barPercentage: 0.8, order: 2
+                    },
+                    {
+                        type: 'line', label: 'Target (40%)',
+                        data: Array(allCOsFlat.length).fill(40),
+                        borderColor: '#ef4444', borderDash: [6, 4], borderWidth: 2,
+                        pointRadius: 0, fill: false, tension: 0, order: 1
+                    }
                 ]
             },
             options: {
                 responsive: true, maintainAspectRatio: false,
-                plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
-                scales: { y: { max: 100, ticks: { callback: function(v) { return v + '%'; } } }, x: { ticks: { font: { size: 9 }, maxRotation: 45 } } }
+                interaction: { mode: 'index' },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            title: function(items) {
+                                var co = allCOsFlat[items[0].dataIndex];
+                                return co ? co.courseName + ' (' + co.course + ')' : '';
+                            },
+                            label: function(item) {
+                                if (item.datasetIndex === 1) return 'Target: 40%';
+                                var co = allCOsFlat[item.dataIndex];
+                                var lv = co && co.level != null ? ' — Level ' + co.level : '';
+                                return item.label + ': ' + item.raw + '%' + lv;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: { max: 100, min: 0, ticks: { callback: function(v) { return v + '%'; }, font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.05)' } },
+                    x: { ticks: { font: { size: 10 }, maxRotation: 45 }, grid: { display: false } }
+                }
             }
         });
+
+        // Build course color legend below chart
+        var legend = courses.filter(function(c) { return c.coAttainments && c.coAttainments.length > 0; }).map(function(c) {
+            return '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:11px;font-weight:500;color:var(--text-2)">' +
+                '<span style="width:10px;height:10px;border-radius:2px;background:' + courseColorMap[c.courseCode] + ';display:inline-block;flex-shrink:0"></span>' +
+                '<span class="course-code" style="font-size:9px;padding:1px 5px">' + c.courseCode + '</span>' + c.courseName +
+                '</span>';
+        }).join('');
+        if (barWrap && legend) {
+            barWrap.innerHTML = '<div style="padding:10px 0 4px;display:flex;flex-wrap:wrap;gap:2px">' + legend + '</div>';
+        }
     }
 
-    const hi = allCOs.filter(function(c) { return c.attainment >= 60; }).length;
-    const md = allCOs.filter(function(c) { return c.attainment >= 40 && c.attainment < 60; }).length;
-    const lo = allCOs.filter(function(c) { return c.attainment < 40; }).length;
+    // ── Course PO/PSO attainment table ────────────────────────
+    var tableWrap = document.getElementById('attainment-table-wrap');
+    if (tableWrap && courses.length > 0) {
+        var allPoHdrs = [], allPsoHdrs = [];
+        courses.forEach(function(c) {
+            (c.poHeaders || []).forEach(function(p) { if (allPoHdrs.indexOf(p) < 0) allPoHdrs.push(p); });
+            (c.psoHeaders || []).forEach(function(p) { if (allPsoHdrs.indexOf(p) < 0) allPsoHdrs.push(p); });
+        });
+        allPoHdrs.sort(function(a,b){ return parseInt((a.match(/\d+$/)||[0])[0],10)-parseInt((b.match(/\d+$/)||[0])[0],10); });
+        allPsoHdrs.sort(function(a,b){ return parseInt((a.match(/\d+$/)||[0])[0],10)-parseInt((b.match(/\d+$/)||[0])[0],10); });
+        var hasPo = allPoHdrs.length > 0, hasPso = allPsoHdrs.length > 0;
+        var tRows = courses.filter(function(c) { return c.coAttainments && c.coAttainments.length > 0; }).map(function(c) {
+            var poTds = allPoHdrs.map(function(p) {
+                var v = c.poAttainment && c.poAttainment[p] != null ? c.poAttainment[p] : 0;
+                return '<td style="text-align:center;color:' + clr(v/3*100) + ';font-weight:600;font-size:11px">' + v + '</td>';
+            }).join('');
+            var psoTds = allPsoHdrs.map(function(p) {
+                var v = c.psoAttainment && c.psoAttainment[p] != null ? c.psoAttainment[p] : 0;
+                return '<td style="text-align:center;color:' + clr(v/3*100) + ';font-weight:600;font-size:11px">' + v + '</td>';
+            }).join('');
+            return '<tr>' +
+                '<td><span class="course-code" style="background:' + courseColorMap[c.courseCode] + '22;color:' + courseColorMap[c.courseCode] + ';font-size:10px">' + c.courseCode + '</span></td>' +
+                '<td style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + c.courseName + '</td>' +
+                '<td style="text-align:center;font-size:11px;color:var(--text-3)">' + c.studentCount + '</td>' +
+                poTds + psoTds + '</tr>';
+        }).join('');
+        if (tRows) {
+            tableWrap.innerHTML += '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">' +
+                '<div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-3);margin-bottom:8px">Course – PO / PSO Attainment (0–3 Scale)</div>' +
+                '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">' +
+                '<thead><tr>' +
+                '<th style="text-align:left;padding:5px 8px;background:var(--bg);font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text-3);white-space:nowrap">Code</th>' +
+                '<th style="text-align:left;padding:5px 8px;background:var(--bg);font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text-3)">Course Name</th>' +
+                '<th style="text-align:center;padding:5px 8px;background:var(--bg);font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text-3)">Students</th>' +
+                (hasPo ? allPoHdrs.map(function(p) { return '<th style="text-align:center;padding:5px 8px;background:#eff6ff;font-size:10px;font-weight:600;color:#3b5bdb">' + p + '</th>'; }).join('') : '') +
+                (hasPso ? allPsoHdrs.map(function(p) { return '<th style="text-align:center;padding:5px 8px;background:#f5f3ff;font-size:10px;font-weight:600;color:#7c3aed">' + p + '</th>'; }).join('') : '') +
+                '</tr></thead><tbody>' + tRows + '</tbody></table></div></div>';
+        }
+    }
+
+    // ── Pie chart: categorize by CO Level (1, 2, 3) ───────────────
+    var coLevelCounts = [0, 0, 0]; // [Level1, Level2, Level3]
+    courses.forEach(function(c) {
+        Object.values(c.coLevels || {}).forEach(function(lv) {
+            if (lv >= 3) coLevelCounts[2]++;
+            else if (lv === 2) coLevelCounts[1]++;
+            else coLevelCounts[0]++; // Level 1 (minimum, includes < 40%)
+        });
+    });
     if (pieChart) pieChart.destroy();
     pieChart = new Chart(document.getElementById('pieChart'), {
         type: 'doughnut',
-        data: { labels: ['>=60% (Target Met)', '40-59% (Moderate)', '<40% (At Risk)'], datasets: [{ data: [hi, md, lo], backgroundColor: ['#12b886', '#f59f00', '#f03e3e'], borderWidth: 0 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } }, cutout: '65%' }
+        data: {
+            labels: ['Level 1 (<60%)', 'Level 2 (60-79%)', 'Level 3 (≥80%)'],
+            datasets: [{ data: coLevelCounts, backgroundColor: ['#3b5bdb', '#f59f00', '#12b886'], borderWidth: 0 }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } },
+            cutout: '65%'
+        }
     });
 
     const list = document.getElementById('course-list');
     if (!courses.length) {
-        list.innerHTML = '<div style="text-align:center;padding:48px;color:var(--text-3)"><i class="fas fa-inbox" style="font-size:32px;opacity:.3;display:block;margin-bottom:12px"></i>No courses with marks found.</div>';
+        list.innerHTML = '<div style="text-align:center;padding:48px;color:var(--text-3)"><i class="fas fa-inbox" style="font-size:32px;opacity:.3;display:block;margin-bottom:12px"></i>No courses with marks found for the selected filters.</div>';
         return;
     }
     list.innerHTML = courses.map(function(c, i) {
         const avg = c.avgAttainment != null ? c.avgAttainment : 0;
         const coRows = (c.coAttainments || []).map(function(co, j) {
+            const lv = (c.coLevels && c.coLevels[co.co] != null) ? c.coLevels[co.co] : (co.level != null ? co.level : null);
+            const lvBadge = lv != null ? ' &nbsp;' + levelBadge(lv) : '';
             return '<div class="co-row" style="flex-direction:column; align-items:stretch; gap:4px;">' +
                 '<div style="display:flex; align-items:center; width:100%">' +
                 '<span class="co-label">' + co.co + '</span>' +
                 '<span class="co-desc" title="' + (co.description || '') + '">' + (co.description || '') + '</span>' +
-                '<div class="co-bar-wrap"><div class="co-bar" style="width:' + Math.max(0, co.attainment) + '%;background:' + clr(co.attainment) + '"></div></div>' +
+                '<div class="co-bar-wrap"><div class="co-bar" style="width:' + Math.max(0, co.attainment) + '%;background:' + courseColorMap[c.courseCode] + '"></div></div>' +
                 '<span class="co-pct" style="color:' + clr(co.attainment) + '">' + co.attainment + '%</span>' +
+                lvBadge +
                 '</div>' +
                 '<div id="co-extra-' + i + '-' + j + '" style="margin-left:80px; font-size:12px; height:18px;"></div>' +
                 '</div>';
         }).join('');
-
-        // Build PO attainment rows — values are 0-3 decimal, display without % sign
         const poHeaders = c.poHeaders || [];
         const poAtt = c.poAttainment || {};
-        const poRows = poHeaders.length > 0 ? '<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PO Attainment</div>' +
-            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;">' +
+        const poRows = poHeaders.length > 0 ? '<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
+            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;">' +
             poHeaders.map(function(po) {
                 const v = poAtt[po] != null ? poAtt[po] : 0;
-                const pct = v / 3 * 100; // scale to 0-100 for colour
-                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + po + ':</strong><span style="color:' + clr(pct) + ';font-weight:600">' + v + '</span></div>';
-            }).join('') +
-            '</div></div>' : '';
-
-        // Build PSO attainment rows — values are 0-3 decimal, display without % sign
+                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + po + ':</strong><span style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</span></div>';
+            }).join('') + '</div></div>' : '';
         const psoHeaders = c.psoHeaders || [];
         const psoAtt = c.psoAttainment || {};
-        const psoRows = psoHeaders.length > 0 ? '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PSO Attainment</div>' +
-            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;">' +
+        const psoRows = psoHeaders.length > 0 ? '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PSO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
+            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;">' +
             psoHeaders.map(function(pso) {
                 const v = psoAtt[pso] != null ? psoAtt[pso] : 0;
-                const pct = v / 3 * 100;
-                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + pso + ':</strong><span style="color:' + clr(pct) + ';font-weight:600">' + v + '</span></div>';
-            }).join('') +
-            '</div></div>' : '';
-
+                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + pso + ':</strong><span style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</span></div>';
+            }).join('') + '</div></div>' : '';
         return '<div class="course-card">' +
             '<div class="course-header" onclick="tog(' + i + ')">' +
-            '<div style="display:flex;align-items:center;min-width:0">' +
-            '<span class="course-code">' + c.courseCode + '</span>' +
+            '<div style="display:flex;align-items:center;min-width:0;gap:10px">' +
+            '<span class="course-code" style="background:' + courseColorMap[c.courseCode] + '22;color:' + courseColorMap[c.courseCode] + '">' + c.courseCode + '</span>' +
             '<span class="course-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + c.courseName + '</span>' +
             '</div>' +
             '<div class="course-meta">' +
@@ -446,32 +565,35 @@ function fillCourseDropdowns(courses) {
     courses.forEach(function(c) { fsel.add(new Option(c.courseCode + ' – ' + c.courseName, c.courseCode)); });
     if (prev) fsel.value = prev;
     fsel.disabled = courses.length === 0;
+    // Student tab dropdown: use course ID as value so backend can find exact entity
     const ssel = document.getElementById('sel_course');
     ssel.innerHTML = '<option value="">-- Select a Course --</option>';
-    courses.forEach(function(c) { ssel.add(new Option(c.courseCode + ' – ' + c.courseName, c.courseCode)); });
+    courses.forEach(function(c) { ssel.add(new Option(c.courseCode + ' – ' + c.courseName, c.id)); });
 }
 
 // ═══ STUDENTS ═════════════════════════════════════════════════
 async function loadStudents() {
-    const code = document.getElementById('sel_course').value;
+    const courseId = document.getElementById('sel_course').value;
     const el = document.getElementById('students-content');
-    if (!code) { el.innerHTML = ''; return; }
+    if (!courseId) { el.innerHTML = ''; return; }
     el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--text-3)">Loading...</div>';
     try {
-        let url = '/dashboard/students?courseCode=' + encodeURIComponent(code);
+        // Use courseId for exact course entity match (avoids findFirstByCourseCode wrong-batch bug)
+        let url = '/dashboard/students?courseId=' + encodeURIComponent(courseId);
         if (S.batchYear) url += '&batchYear=' + S.batchYear;
         const d = await get(url);
+        if (d.error) { el.innerHTML = '<div style="color:var(--danger);padding:16px">' + d.error + '</div>'; return; }
         const students = d.students || [], coCodes = d.coCodes || [], poHeaders = d.poHeaders || [];
-        if (!students.length) { el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)">No student data for this course.</div>'; return; }
+        if (!students.length) { el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)"><i class="fas fa-user-slash" style="font-size:28px;opacity:.3;display:block;margin-bottom:12px"></i>No student data for this course.<br><small>Make sure marks Excel files are uploaded for this course.</small></div>'; return; }
         const coHdrs = coCodes.map(function(c) { return '<th>' + c + '</th>'; }).join('');
-        const poHdrs = poHeaders.map(function(p) { return '<th>' + p + '</th>'; }).join('');
+        const poHdrs = poHeaders.map(function(p) { return '<th>' + p + ' <span style="font-weight:400;font-size:9px;opacity:.7">(0-3)</span></th>'; }).join('');
         const rows = students.map(function(s) {
             const coTds = coCodes.map(function(c) { const v = s[c] != null ? s[c] : 0; return '<td class="co-pct-cell ' + (v < 40 ? 'low' : '') + '">' + v + '%</td>'; }).join('');
-            const poTds = poHeaders.map(function(p) { const v = (s.poAttainment || {})[p] != null ? (s.poAttainment || {})[p] : 0; return '<td style="color:' + clr(v) + '">' + v + '%</td>'; }).join('');
+            const poTds = poHeaders.map(function(p) { const v = (s.poAttainment || {})[p] != null ? (s.poAttainment || {})[p] : 0; return '<td style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</td>'; }).join('');
             const overall = s.overall != null ? s.overall : 0;
             return '<tr><td style="font-family:var(--mono);font-size:12px">' + (s.enrollmentNo || '—') + '</td><td>' + (s.name || '—') + '</td>' + coTds + poTds + '<td><strong style="color:' + clr(overall) + '">' + overall + '%</strong></td><td><span class="badge ' + (s.status === 'Pass' ? 'badge-green' : 'badge-red') + '">' + s.status + '</span></td></tr>';
         }).join('');
-        el.innerHTML = '<div class="data-card"><div class="data-card-header"><div class="data-card-title"><i class="fas fa-users" style="color:var(--accent)"></i>' + d.courseCode + ': ' + d.courseName + '</div><span style="font-size:12px;color:var(--text-3)">' + students.length + ' students</span></div><div class="table-wrap"><table><thead><tr><th>Enrollment</th><th>Name</th>' + coHdrs + poHdrs + '<th>Overall</th><th>Status</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+        el.innerHTML = '<div class="data-card"><div class="data-card-header"><div class="data-card-title"><i class="fas fa-users" style="color:var(--accent)"></i> ' + (d.courseCode || '') + ': ' + (d.courseName || '') + '</div><span style="font-size:12px;color:var(--text-3)">' + students.length + ' students</span></div><div class="table-wrap"><table><thead><tr><th>Enrollment</th><th>Name</th>' + coHdrs + poHdrs + '<th>Overall</th><th>Status</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
     } catch (e) { el.innerHTML = '<div style="color:var(--danger);padding:16px">Error: ' + e.message + '</div>'; }
 }
 

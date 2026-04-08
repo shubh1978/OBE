@@ -1,0 +1,20 @@
+# Git-ignored files/folders — also ignore in Docker build context
+target/
+*.class
+*.log
+.git
+.gitignore
+.idea/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+.mvn/wrapper/maven-wrapper.jar
+README.md
+ATTAINMENT_CALCULATION.md
+API_REFERENCE.md
+DBDump.class
+SpecDump.class
+TestRegex.class
+app.log
+SOET/

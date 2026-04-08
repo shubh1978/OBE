@@ -28,6 +28,37 @@ public class AttainmentController {
     }
 
     /**
+     * Get CO attainment LEVELS (0-3) for a course.
+     * Level 0 : < 40% students achieved >= 40% of CO marks
+     * Level 1 : >= 40% students achieved >= 40% of CO marks
+     * Level 2 : >= 60% students achieved >= 40% of CO marks
+     * Level 3 : >= 80% students achieved >= 40% of CO marks
+     *
+     * @param courseId Course ID
+     * @return Map of CO code -> level (0-3)
+     */
+    @GetMapping("/co-levels/{courseId}")
+    public ResponseEntity<Map<String, Integer>> getCOLevels(@PathVariable Long courseId) {
+        Map<String, Integer> coLevels = attainmentService.getCOLevels(courseId);
+        return ResponseEntity.ok(coLevels);
+    }
+
+    /**
+     * Get total number of distinct students with marks for this course.
+     *
+     * @param courseId Course ID
+     * @return Student count
+     */
+    @GetMapping("/student-count/{courseId}")
+    public ResponseEntity<Map<String, Object>> getStudentCount(@PathVariable Long courseId) {
+        int count = attainmentService.getStudentCount(courseId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("courseId", courseId);
+        result.put("studentCount", count);
+        return ResponseEntity.ok(result);
+    }
+
+    /**
      * Get CO attainment separated by exam type (mid-term vs end-term)
      * Useful for tracking progress throughout the course
      * 

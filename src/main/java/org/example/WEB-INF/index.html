@@ -54,7 +54,7 @@ select,input,button{font-family:inherit}
 .empty-state h3{font-size:18px;color:var(--text-2);margin-bottom:6px}
 
 /* KPI */
-.kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:20px}
+.kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px}
 .kpi{background:var(--bg-card);border-radius:var(--radius);padding:16px 18px;display:flex;align-items:center;gap:14px;box-shadow:var(--shadow);border:1px solid var(--border)}
 .kpi-icon{width:40px;height:40px;border-radius:8px;display:grid;place-items:center;font-size:16px;flex-shrink:0}
 .kpi-icon.blue{background:#eff6ff;color:#3b82f6}
@@ -69,7 +69,7 @@ select,input,button{font-family:inherit}
 .chart-grid{display:grid;grid-template-columns:1fr 300px;gap:14px;margin-bottom:20px}
 .card{background:var(--bg-card);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow);border:1px solid var(--border)}
 .card-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-3);margin-bottom:14px}
-.chart-wrap{position:relative;height:220px}
+.chart-wrap{position:relative;height:260px}
 
 /* COURSE CARDS */
 .course-card{background:var(--bg-card);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow);margin-bottom:12px;overflow:hidden}
@@ -90,7 +90,7 @@ select,input,button{font-family:inherit}
 .co-desc{font-size:11px;color:var(--text-3);width:200px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .co-bar-wrap{flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden}
 .co-bar{height:100%;border-radius:4px;transition:width .6s ease}
-.co-pct{font-size:12px;font-weight:600;width:40px;text-align:right;flex-shrink:0}
+.co-pct{font-size:12px;font-weight:600;min-width:44px;text-align:right;flex-shrink:0}
 
 /* DATA CARDS */
 .data-card{background:var(--bg-card);border-radius:var(--radius);border:1px solid var(--border);box-shadow:var(--shadow);margin-bottom:14px;overflow:hidden}
@@ -180,13 +180,12 @@ tr:hover td{background:var(--bg)}
   <div id="view-dashboard" class="hidden">
     <div class="kpi-grid">
       <div class="kpi"><div class="kpi-icon blue"><i class="fas fa-book-open"></i></div><div><div class="kpi-val" id="kpi-courses">—</div><div class="kpi-label">Courses with Marks</div></div></div>
-      <div class="kpi"><div class="kpi-icon green"><i class="fas fa-check-circle"></i></div><div><div class="kpi-val" id="kpi-attainment">—</div><div class="kpi-label">Avg CO Attainment</div></div></div>
-      <div class="kpi"><div class="kpi-icon purple"><i class="fas fa-project-diagram"></i></div><div><div class="kpi-val" id="kpi-po">—</div><div class="kpi-label">Avg PO Attainment</div></div></div>
       <div class="kpi"><div class="kpi-icon orange"><i class="fas fa-user-graduate"></i></div><div><div class="kpi-val" id="kpi-students">—</div><div class="kpi-label">Students Evaluated</div></div></div>
       <div class="kpi"><div class="kpi-icon red"><i class="fas fa-exclamation-triangle"></i></div><div><div class="kpi-val" id="kpi-risk">—</div><div class="kpi-label">At Risk (&lt;40%)</div></div></div>
     </div>
     <div class="chart-grid">
-      <div class="card"><div class="card-title">CO Attainment vs Target (60%)</div><div class="chart-wrap"><canvas id="barChart"></canvas></div></div>
+      <div class="card"><div class="card-title">CO ATTAINMENT VS TARGET (40%)</div><div class="chart-wrap"><canvas id="barChart"></canvas></div>
+      <div id="attainment-table-wrap"></div></div>
       <div class="card"><div class="card-title">Attainment Distribution</div><div class="chart-wrap"><canvas id="pieChart"></canvas></div></div>
     </div>
     <div id="course-list"></div>
