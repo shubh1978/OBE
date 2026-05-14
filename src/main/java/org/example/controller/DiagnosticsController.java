@@ -298,5 +298,154 @@ public class DiagnosticsController {
 
         return ResponseEntity.ok(summary);
     }
-}
 
+    /**
+     * GET /api/diagnostics/duplicate-cos
+     * Identifies courses with duplicate CO codes
+     */
+    @GetMapping("/duplicate-cos")
+    public ResponseEntity<?> findDuplicateCOs() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        
+        for (Course course : courseRepository.findAll()) {
+            List<CO> cos = coRepository.findByCourse(course);
+            
+            // Group COs by code to find duplicates
+            Map<String, List<CO>> byCode = new HashMap<>();
+            for (CO co : cos) {
+                byCode.computeIfAbsent(co.getCode(), k -> new ArrayList<>()).add(co);
+            }
+            
+            for (Map.Entry<String, List<CO>> entry : byCode.entrySet()) {
+                if (entry.getValue().size() > 1) {
+                    Map<String, Object> issue = new LinkedHashMap<>();
+                    issue.put("courseCode", course.getCourseCode());
+                    issue.put("courseName", course.getCourseName());
+                    issue.put("coCode", entry.getKey());
+                    issue.put("duplicateCount", entry.getValue().size());
+                    List<Long> ids = new ArrayList<>();
+                    List<String> descriptions = new ArrayList<>();
+                    for (CO co : entry.getValue()) {
+                        ids.add(co.getId());
+                        descriptions.add(co.getDescription());
+                    }
+                    issue.put("coIds", ids);
+                    issue.put("descriptions", descriptions);
+                    result.add(issue);
+                }
+            }
+        }
+        
+        return ResponseEntity.ok(new LinkedHashMap<String, Object>() {{
+            put("totalDuplicates", result.size());
+            put("duplicates", result);
+            put("message", result.isEmpty() ? "✓ No duplicate COs found" : "⚠️ Found duplicate COs");
+        }});
+    }
+
+    /**
+     * GET /api/diagnostics/missing-mappings
+     * Identifies courses with questions but no CO-Question mappings
+     */
+    @GetMapping("/missing-mappings")
+    public ResponseEntity<?> findMissingMappings() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        
+        for (Course course : courseRepository.findAll()) {
+            List<StudentMark> marks = studentMarkRepository.findByCourse(course);
+            if (marks.isEmpty()) continue; // Skip courses without marks
+            
+            // Get questions from marks
+            Set<String> questionsInMarks = new HashSet<>();
+            for (StudentMark m : marks) {
+                if (m.getQuestion() != null && !m.getQuestion().isEmpty()) {
+                    questionsInMarks.add(m.getQuestion());
+                }
+            }
+            
+            // Get mapped questions
+            List<QuestionCOMapping> mappings = questionCOMappingRepository.findByCourseId(course.getId());
+            Set<String> mappedQuestions = new HashSet<>();
+            for (QuestionCOMapping m : mappings) {
+                mappedQuestions.add(m.getQuestionLabel());
+            }
+            
+            // Find unmapped questions
+            Set<String> unmappedQuestions = new HashSet<>(questionsInMarks);
+            unmappedQuestions.removeAll(mappedQuestions);
+            
+            if (!unmappedQuestions.isEmpty()) {
+                Map<String, Object> issue = new LinkedHashMap<>();
+                issue.put("courseCode", course.getCourseCode());
+                issue.put("courseName", course.getCourseName());
+                issue.put("totalQuestions", questionsInMarks.size());
+                issue.put("mappedQuestions", mappedQuestions.size());
+                issue.put("unmappedQuestions", unmappedQuestions.size());
+                issue.put("unmappedList", new ArrayList<>(unmappedQuestions));
+                result.add(issue);
+            }
+        }
+        
+        return ResponseEntity.ok(new LinkedHashMap<String, Object>() {{
+            put("coursesWithMissingMappings", result.size());
+            put("issues", result);
+            put("message", result.isEmpty() ? "✓ All questions are mapped" : "⚠️ Found unmapped questions");
+        }});
+    }
+
+    /**
+     * GET /api/diagnostics/course-summary
+     * Summary of all courses with their data completeness
+     */
+    @GetMapping("/course-summary")
+    public ResponseEntity<?> getCourseSummary() {
+        List<Map<String, Object>> courses = new ArrayList<>();
+        
+        for (Course course : courseRepository.findAll()) {
+            List<CO> cos = coRepository.findByCourse(course);
+            List<StudentMark> marks = studentMarkRepository.findByCourse(course);
+            List<QuestionCOMapping> mappings = questionCOMappingRepository.findByCourseId(course.getId());
+            
+            long distinctStudents = 0;
+            for (StudentMark m : marks) {
+                if (m.getStudent() != null) distinctStudents++;
+            }
+            
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("courseCode", course.getCourseCode());
+            summary.put("courseName", course.getCourseName());
+            summary.put("cos", cos.size());
+            summary.put("mappings", mappings.size());
+            summary.put("marks", marks.size());
+            summary.put("students", (int) distinctStudents);
+            summary.put("markQuality", marks.isEmpty() ? "NO_DATA" :
+                       mappings.isEmpty() ? "NO_MAPPINGS" :
+                       distinctStudents == 0 ? "NO_STUDENTS" :
+                       "OK");
+            courses.add(summary);
+        }
+        
+        long totalCourses = courseRepository.count();
+        long coursesWithMarks = 0;
+        long coursesOK = 0;
+        for (Map<String, Object> c : courses) {
+            String quality = (String) c.get("markQuality");
+            if (!quality.equals("NO_DATA")) coursesWithMarks++;
+            if (quality.equals("OK")) coursesOK++;
+        }
+        
+        String healthScore = totalCourses > 0 ? 
+            String.format("%.1f%%", (coursesOK * 100.0 / totalCourses)) : "N/A";
+        
+        Map<String, Object> summaryMap = new LinkedHashMap<>();
+        summaryMap.put("totalCourses", totalCourses);
+        summaryMap.put("coursesWithMarks", coursesWithMarks);
+        summaryMap.put("coursesOK", coursesOK);
+        summaryMap.put("healthScore", healthScore);
+        
+        return ResponseEntity.ok(new LinkedHashMap<String, Object>() {{
+            put("summary", summaryMap);
+            put("courses", courses);
+        }});
+    }
+}

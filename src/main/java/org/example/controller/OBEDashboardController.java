@@ -4,7 +4,9 @@ import lombok.RequiredArgsConstructor;
 import org.example.entity.*;
 import org.example.repository.*;
 import org.example.service.AttainmentService;
+import org.example.util.EnrollmentCodeUtil;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
@@ -27,7 +29,9 @@ public class OBEDashboardController {
     private final StudentMarkRepository      studentMarkRepository;
     private final StudentRepository          studentRepository;
     private final SpecializationRepository   specializationRepository;
+    private final QuestionCOMappingRepository questionCOMappingRepository;
     private final AttainmentService          attainmentService;
+    private final EnrollmentCodeUtil         enrollmentCodeUtil;
 
     @GetMapping("/batches")
     public ResponseEntity<?> getBatches(@RequestParam(required = false) Long programId) {
@@ -132,7 +136,19 @@ public class OBEDashboardController {
         Map<String, List<Double>> branchPoAtt = new LinkedHashMap<>(), branchPsoAtt = new LinkedHashMap<>();
 
         for (Course course : courses) {
-            List<StudentMark> marks = studentMarkRepository.findByCourse(course);
+            // Load marks scoped to the selected specialization when one is set.
+            // This ensures student count, at-risk count, and CO/PO/PSO attainment
+            // all reflect only the students from the selected specialization.
+            final Long specId = specializationId;
+            List<StudentMark> marks = (specId != null)
+                    ? studentMarkRepository.findByCourseIdAndSpecId(course.getId(), specId)
+                    : studentMarkRepository.findByCourse(course);
+
+            // If the spec-filtered list is empty (students not yet assigned), fall back to ALL
+            if (marks.isEmpty() && specId != null) {
+                marks = studentMarkRepository.findByCourse(course);
+            }
+
             List<CO> cos = new ArrayList<>(coRepository.findByCourse(course));
 
             // Sort COs numerically
@@ -156,8 +172,9 @@ public class OBEDashboardController {
                     .collect(Collectors.groupingBy(sm -> sm.getStudent().getId()));
             totalStudents = Math.max(totalStudents, byStudent.size());
 
-            // ── CO Attainment ────────────────────────────────────────────
-            Map<String, Double> coAttMap = attainmentService.calculateCOAttainment(course.getId());
+            // ── CO Attainment — scoped to selected specialization ────────────────────
+            Map<String, Double> coAttMap = attainmentService.calculateCOAttainment(course.getId(), specId);
+
             List<Map<String, Object>> coAttainments = new ArrayList<>();
             for (Map.Entry<String, Double> entry : coAttMap.entrySet()) {
                 String coCode = entry.getKey();
@@ -193,7 +210,8 @@ public class OBEDashboardController {
                 }
                 coPoRows.add(row);
             }
-            Map<String, Double> poAttService = attainmentService.calculatePOAttainment(course.getId());
+            Map<String, Double> poAttService = attainmentService.calculatePOAttainment(course.getId(), specId);
+
             Map<String, Double> poAttainment = new LinkedHashMap<>();
             for (String p : poHeaders) {
                 double score0to3 = poAttService.getOrDefault(p, 0.0);
@@ -219,7 +237,8 @@ public class OBEDashboardController {
                         for (String ps : psoHeaders) row.put(ps, psoWeights.getOrDefault(ps, 0));
                         coPsoRows.add(row);
                     }
-                    Map<String, Double> psoAttService = attainmentService.calculatePSOAttainment(course.getId());
+                    Map<String, Double> psoAttService = attainmentService.calculatePSOAttainment(course.getId(), specId);
+
                     for (String ps : psoHeaders) {
                         double score0to3 = psoAttService.getOrDefault(ps, 0.0);
                         double att = r1((score0to3 / 3.0) * 100.0);
@@ -246,34 +265,58 @@ public class OBEDashboardController {
                 .mapToDouble(c -> (double)c.get("avgAttainment")).average().orElse(0));
 
         Map<String, Object> resp = new LinkedHashMap<>();
-        resp.put("totalCourses", courseResults.stream().filter(c -> (int)c.get("studentCount") > 0).count());
-        resp.put("totalStudents", totalStudents);
-        resp.put("atRiskStudents", atRiskCount); resp.put("overallAttainment", overallAtt);
-        resp.put("branchPoAttainment", branchPoAvg); resp.put("branchPsoAttainment", branchPsoAvg);
-        resp.put("courses", courseResults);
-        return ResponseEntity.ok(resp);
+         // Count all courses (including those without marks) for display in frontend
+         resp.put("totalCourses", courseResults.size());
+         resp.put("totalCoursesWithMarks", courseResults.stream().filter(c -> (int)c.get("studentCount") > 0).count());
+         resp.put("totalStudents", totalStudents);
+         resp.put("atRiskStudents", atRiskCount); resp.put("overallAttainment", overallAtt);
+         resp.put("branchPoAttainment", branchPoAvg); resp.put("branchPsoAttainment", branchPsoAvg);
+         resp.put("courses", courseResults);
+         return ResponseEntity.ok(resp);
     }
 
     @GetMapping("/courses")
+    @Transactional(readOnly = true)
     public ResponseEntity<?> getCoursesDropdown(
             @RequestParam(required = false) Long semesterId,
             @RequestParam(required = false) Long specializationId,
             @RequestParam(required = false) Long programId,
             @RequestParam(required = false) String batchYear) {
-        List<Course> courses = semesterId != null
-                ? new ArrayList<>(courseRepository.findBySemesterId(semesterId))
-                : getCoursesForFilter(programId, specializationId, batchYear);
+        List<Course> courses;
+        if (semesterId != null && programId != null) {
+            // Both program and semester specified — use combined filter to avoid cross-program course leakage
+            courses = new ArrayList<>(courseRepository.findByProgramIdAndSemesterId(programId, semesterId));
+        } else if (semesterId != null) {
+            courses = new ArrayList<>(courseRepository.findBySemesterId(semesterId));
+        } else {
+            courses = getCoursesForFilter(programId, specializationId, batchYear);
+        }
+
         if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
             try { int fy = Integer.parseInt(batchYear);
                 courses = courses.stream().filter(c -> c.getBatch() != null && fy == c.getBatch().getStartYear()).collect(Collectors.toList());
             } catch (NumberFormatException ignored) {}
         }
-        // Deduplicate: pick the course entity with most marks when same code appears in multiple specializations
         courses = deduplicateCourses(courses);
+        // Capture specId for lambda
+        final Long specId = specializationId;
         return ResponseEntity.ok(courses.stream()
                 .map(c -> {
-                    long studentCount = studentMarkRepository.findByCourse(c).stream()
-                            .map(sm -> sm.getStudent().getId()).distinct().count();
+                    // Use a COUNT query — far faster than loading all mark rows.
+                    // When a specialization filter is active, count only students
+                    // from batches belonging to that specialization so that a common
+                    // course (e.g. ENMA101 taken by all BTech students) shows the
+                    // correct ~50 Cyber-Security students rather than all 1123.
+                    long studentCount;
+                    try {
+                        if (specId != null) {
+                            studentCount = studentMarkRepository.countDistinctStudentsByCourseAndSpecialization(c, specId);
+                        } else {
+                            studentCount = studentMarkRepository.countDistinctStudentsByCourse(c);
+                        }
+                    } catch (Exception e) {
+                        studentCount = studentMarkRepository.countDistinctStudentsByCourse(c);
+                    }
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("id", c.getId());
                     m.put("code", c.getCourseCode());
@@ -285,99 +328,228 @@ public class OBEDashboardController {
     }
 
     @GetMapping("/students")
+    @Transactional(readOnly = true)
     public ResponseEntity<?> getStudentPerformance(
             @RequestParam(required = false) String courseCode,
             @RequestParam(required = false) Long courseId,
-            @RequestParam(required = false) String batchYear) {
-        // Prefer courseId (exact match) over courseCode (may match wrong batch entity)
-        Course course;
-        if (courseId != null) {
-            course = courseRepository.findById(courseId).orElse(null);
-        } else if (courseCode != null) {
-            course = courseRepository.findFirstByCourseCode(courseCode).orElse(null);
-        } else {
-            return ResponseEntity.ok(Map.of("error", "Provide courseId or courseCode"));
-        }
-        if (course == null) return ResponseEntity.ok(Map.of("error", "Course not found"));
-        List<StudentMark> marks = new ArrayList<>(studentMarkRepository.findByCourse(course));
-        if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
-            try { int fy = Integer.parseInt(batchYear);
-                marks = marks.stream().filter(sm -> { if (sm.getStudent()==null||sm.getStudent().getBatch()==null) return false; try { return fy==sm.getStudent().getBatch().getStartYear(); } catch (Exception e) { return false; } }).collect(Collectors.toList());
-            } catch (NumberFormatException ignored) {}
-        }
-        List<CO> cos = new ArrayList<>(coRepository.findByCourse(course));
-        cos.sort(Comparator.comparingInt(co -> { try { return Integer.parseInt(extractCoNum(co.getCode())); } catch (Exception e) { return 999; } }));
-        if (marks.isEmpty()) return ResponseEntity.ok(Map.of("courseCode", course.getCourseCode() != null ? course.getCourseCode() : "", "courseName", course.getCourseName() != null ? course.getCourseName() : "", "students", List.of(), "coCodes", List.of()));
-        if (cos.isEmpty()) {
-            marks.stream().map(StudentMark::getQuestion)
-                    .filter(q -> q != null && q.matches("Q\\d+.*"))
-                    .map(q -> q.replaceAll("^Q0*(\\d+).*", "$1"))
-                    .filter(n -> n.matches("\\d+"))
-                    .distinct()
-                    .sorted(Comparator.comparingInt(Integer::parseInt))
-                    .forEach(num -> {
-                        CO co = new CO(); co.setCode(course.getCourseCode() + "-CO" + num);
-                        co.setDescription("Course Outcome " + num); co.setCourse(course); cos.add(co);
-                    });
-        }
-        List<String> coCodes = cos.stream().map(CO::getCode).collect(Collectors.toList());
-        Program prog = course.getProgram();
-        List<PO> pos = prog != null ? new ArrayList<>(poRepository.findByProgram(prog)) : List.of();
-        pos.sort(Comparator.comparingInt(po -> { try { return Integer.parseInt(po.getCode().replaceAll("\\D+","")); } catch (Exception e) { return 999; } }));
-        Map<String, Map<String, Integer>> coPOW = new LinkedHashMap<>();
-        for (CO co : cos) {
-            Map<String, Integer> w = new HashMap<>();
-            if (co.getId() != null) copoRepository.findByCoId(co.getId()).forEach(m -> w.put(m.getPo().getCode(), m.getWeight()));
-            coPOW.put(co.getCode(), w);
-        }
-        Map<Long, Map<String, Double>> stAttService = attainmentService.calculateIndividualStudentCOAttainment(course.getId());
-        Map<Long, List<StudentMark>> stMarksMap = marks.stream().collect(Collectors.groupingBy(sm -> sm.getStudent().getId()));
-        
-        List<Map<String, Object>> students = new ArrayList<>();
-        for (Map.Entry<Long, List<StudentMark>> entry : stMarksMap.entrySet()) {
-            Long sid = entry.getKey();
-            StudentMark firstSm = entry.getValue().get(0);
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("enrollmentNo", firstSm.getStudent().getEnrollmentNumber());
-            row.put("name", firstSm.getStudent().getName());
-            
-            Map<String, Double> coPctMap = stAttService.getOrDefault(sid, new HashMap<>());
-            Map<String, Double> coAtt = new LinkedHashMap<>();
-            for (String c : coCodes) {
-                double pct = r1(coPctMap.getOrDefault(c, 0.0));
-                row.put(c, pct); coAtt.put(c, pct);
+            @RequestParam(required = false) String batchYear,
+            @RequestParam(required = false) Long specializationId) {
+        try {
+            // 1. Resolve course
+            Course course;
+            if (courseId != null) {
+                course = courseRepository.findById(courseId).orElse(null);
+            } else if (courseCode != null) {
+                List<Course> candidates = courseRepository.findAllByCourseCode(courseCode);
+                course = candidates.stream()
+                        .max(Comparator.comparingLong(c -> studentMarkRepository.countMarksByCourse(c)))
+                        .orElse(null);
+            } else {
+                return ResponseEntity.ok(Map.of("error", "Provide courseId or courseCode"));
             }
-            
-            // Calculate total obtained/max for overall column (without CO mapping limit, just raw sum)
-            double totalObt = entry.getValue().stream().filter(sm -> sm.getMaxMarks() != null && sm.getMaxMarks() > 0).mapToDouble(sm -> sm.getMarks() != null ? sm.getMarks() : 0).sum();
-            double totalMax = entry.getValue().stream().filter(sm -> sm.getMaxMarks() != null && sm.getMaxMarks() > 0).mapToDouble(StudentMark::getMaxMarks).sum();
-            
-            Map<String, Double> spa = new LinkedHashMap<>();
-            for (PO po : pos) {
-                double ws=0, wt=0;
-                for (CO co : cos) {
-                    int w = coPOW.getOrDefault(co.getCode(), Map.of()).getOrDefault(po.getCode(), 0);
-                    if (w > 0) {
-                        // Convert individual student's CO % to a level (0-3) using same threshold as AttainmentService
-                        double coPct = coAtt.getOrDefault(co.getCode(), 0.0);
-                        double coLevel = coPct >= 80.0 ? 3.0 : coPct >= 60.0 ? 2.0 : 1.0; // min level is 1
-                        ws += coLevel * w;
-                        wt += w;
+            if (course == null) return ResponseEntity.ok(Map.of("error", "Course not found"));
+
+            // 2. Resolve the effective course entity — the one that actually has marks.
+            //    If the selected entity has 0 marks, find the sibling (same code+program).
+            Course effectiveCourse = course;
+            if (course.getProgram() != null) {
+                long markCount = studentMarkRepository.countMarksByCourse(course);
+                if (markCount == 0) {
+                    List<Course> siblings = courseRepository.findByProgram(course.getProgram());
+                    effectiveCourse = siblings.stream()
+                        .filter(s -> course.getCourseCode().equals(s.getCourseCode()) && !s.getId().equals(course.getId()))
+                        .max(Comparator.comparingLong(s -> studentMarkRepository.countMarksByCourse(s)))
+                        .filter(s -> studentMarkRepository.countMarksByCourse(s) > 0)
+                        .orElse(course);
+                }
+            }
+            final Course finalCourse = effectiveCourse;
+
+            // 3. Load marks filtered by specialization.
+            //    Primary filter: student.specialization_id (set correctly after uploading the
+            //    enrollment Excel via Upload Data → Assign Specializations).
+            //    When specializationId is null (no filter), all marks for the course are loaded.
+            //    When a specialization is selected but returns 0 students, we return empty —
+            //    this is correct and will resolve itself once enrollment data is uploaded.
+            List<StudentMark> marks;
+            if (specializationId != null) {
+                marks = new ArrayList<>(studentMarkRepository.findByCourseAndSpecId(finalCourse, specializationId));
+                // No fallback to all-marks: showing wrong students is worse than showing 0.
+            } else {
+                marks = new ArrayList<>(studentMarkRepository.findByCourseWithStudent(finalCourse));
+            }
+
+            // 4. Filter by batchYear.
+            // For null-batch students, validate via enrollment number year prefix (digits 1-2)
+            // rather than blindly including them — prevents cross-year students from leaking in.
+            if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
+                try {
+                    int fy = Integer.parseInt(batchYear);
+                    String yearPrefix = String.format("%02d", fy % 100); // 2023 → "23"
+                    List<StudentMark> byBatch = marks.stream().filter(sm -> {
+                        if (sm.getStudent() == null) return false;
+                        if (sm.getStudent().getBatch() == null) {
+                            // No batch set: match via enrollment number year prefix
+                            String enr = sm.getStudent().getEnrollmentNumber();
+                            return enr != null && enr.length() >= 2 && enr.startsWith(yearPrefix);
+                        }
+                        try { return fy == sm.getStudent().getBatch().getStartYear(); }
+                        catch (Exception e) { return false; }
+                    }).collect(Collectors.toList());
+                    if (!byBatch.isEmpty()) marks = byBatch;
+                } catch (NumberFormatException ignored) {}
+            }
+
+            // 5. Prepare CO list (sorted) — use finalCourse (the entity that has marks + COs)
+            List<CO> coList = new ArrayList<>(coRepository.findByCourseId(finalCourse.getId()));
+            // If the effective course has no COs, fall back to the original selected course
+            if (coList.isEmpty()) coList = new ArrayList<>(coRepository.findByCourseId(course.getId()));
+            coList.sort(Comparator.comparingInt(co -> { try { return Integer.parseInt(extractCoNum(co.getCode())); } catch (Exception e) { return 999; } }));
+
+            // ── Deduplicate COs: prefer full-code (COURSECODE-CO1) over short-code (CO1) ──
+            // The DB may contain both if the structure parser and ZipIngestionService both ran.
+            // Key = numeric CO number extracted from code (e.g. "1" for both "CO1" and "ENMA102-CO1");
+            // longer code (full-code) wins.
+            {
+                java.util.Map<String, CO> bestByNum = new java.util.LinkedHashMap<>();
+                for (CO co : coList) {
+                    String num = extractCoNum(co.getCode());
+                    CO existing = bestByNum.get(num);
+                    if (existing == null || co.getCode().length() > existing.getCode().length()) {
+                        bestByNum.put(num, co);
                     }
                 }
-                // Return on 0-3 scale (like course-level PO attainment from AttainmentService)
-                spa.put(po.getCode(), wt > 0 ? r1(ws / wt) : 0.0);
+                coList = new ArrayList<>(bestByNum.values());
             }
-            row.put("poAttainment", spa);
-            double overall = totalMax>0 ? Math.min(100.0, r1(totalObt/totalMax*100.0)) : 0;
-            row.put("overall", overall); row.put("status", overall>=40?"Pass":"At Risk");
-            students.add(row);
+
+            if (marks.isEmpty()) {
+                return ResponseEntity.ok(Map.of(
+                    "courseCode", finalCourse.getCourseCode() != null ? finalCourse.getCourseCode() : "",
+                    "courseName", finalCourse.getCourseName() != null ? finalCourse.getCourseName() : "",
+                    "students", List.of(), "coCodes", List.of(), "poHeaders", List.of()));
+            }
+
+            List<String> coCodes;
+            if (!coList.isEmpty()) {
+                coCodes = coList.stream().map(CO::getCode).collect(Collectors.toList());
+            } else {
+                // No COs defined — derive from questions in the mark data
+                List<CO> synth = new ArrayList<>();
+                marks.stream().map(StudentMark::getQuestion)
+                    .filter(q -> q != null && q.matches("Q\\d+.*"))
+                    .map(q -> q.replaceAll("^Q0*(\\d+).*", "$1")).filter(n -> n.matches("\\d+"))
+                    .distinct().sorted(Comparator.comparingInt(Integer::parseInt))
+                    .forEach(num -> {
+                        CO co = new CO(); co.setCode(course.getCourseCode() + "-CO" + num);
+                        co.setDescription("Course Outcome " + num); co.setCourse(course); synth.add(co);
+                    });
+                coList = synth;
+                coCodes = coList.stream().map(CO::getCode).collect(Collectors.toList());
+            }
+
+            // 6. Pre-load QCO mappings → O(1) lookup: questionLabel.upper → coId, coId → maxMarks
+            //    NO second marks load — we reuse the already-loaded marks list.
+            List<QuestionCOMapping> qcoMappings = questionCOMappingRepository.findByCourseId(course.getId());
+            Map<String, Long> questionToCoId = new HashMap<>();   // UPPER(label) → coId
+            Map<Long, Double>  coMaxMarksMap  = new HashMap<>();   // coId → total max marks
+            Map<Long, String>  coIdToCode     = new HashMap<>();   // coId → coCode
+            for (CO co : coList) { if (co.getId() != null) coIdToCode.put(co.getId(), co.getCode()); }
+            for (QuestionCOMapping qm : qcoMappings) {
+                if (qm.getQuestionLabel() != null && qm.getCo() != null) {
+                    questionToCoId.put(qm.getQuestionLabel().toUpperCase(), qm.getCo().getId());
+                    coMaxMarksMap.merge(qm.getCo().getId(), qm.getMaxMarks(), Double::sum);
+                }
+            }
+            boolean hasCOMappings = !questionToCoId.isEmpty();
+
+            // 7. Load POs + CO-PO weights
+            Program prog = course.getProgram();
+            List<PO> pos = prog != null ? new ArrayList<>(poRepository.findByProgram(prog)) : List.of();
+            pos.sort(Comparator.comparingInt(po -> { try { return Integer.parseInt(po.getCode().replaceAll("\\D+","")); } catch (Exception e) { return 999; } }));
+            Map<String, Map<String, Integer>> coPOW = new LinkedHashMap<>();
+            for (CO co : coList) {
+                Map<String, Integer> w = new HashMap<>();
+                if (co.getId() != null)
+                    copoRepository.findByCoId(co.getId()).forEach(m -> { if (m.getPo() != null) w.put(m.getPo().getCode(), m.getWeight()); });
+                coPOW.put(co.getCode(), w);
+            }
+
+            // 8. Group marks by student and compute per-student CO attainment INLINE
+            //    (no second DB load, no N+1)
+            Map<Long, List<StudentMark>> stMarksMap = marks.stream()
+                    .collect(Collectors.groupingBy(sm -> sm.getStudent().getId()));
+
+            List<Map<String, Object>> students = new ArrayList<>();
+            for (Map.Entry<Long, List<StudentMark>> entry : stMarksMap.entrySet()) {
+                Student stu = entry.getValue().get(0).getStudent();
+                List<StudentMark> stMarks = entry.getValue();
+
+                double totalObt = stMarks.stream().filter(sm -> sm.getMaxMarks() != null && sm.getMaxMarks() > 0)
+                        .mapToDouble(sm -> sm.getMarks() != null ? sm.getMarks() : 0).sum();
+                double totalMax = stMarks.stream().filter(sm -> sm.getMaxMarks() != null && sm.getMaxMarks() > 0)
+                        .mapToDouble(StudentMark::getMaxMarks).sum();
+
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("enrollmentNo", stu.getEnrollmentNumber());
+                row.put("name", stu.getName());
+
+                Map<String, Double> coAtt = new LinkedHashMap<>();
+                if (hasCOMappings) {
+                    // Per-CO marks from question→CO mapping
+                    Map<Long, Double> coObt = new HashMap<>();
+                    for (StudentMark sm : stMarks) {
+                        if (sm.getQuestion() == null) continue;
+                        Long coId = questionToCoId.get(sm.getQuestion().toUpperCase());
+                        if (coId == null) continue;
+                        coObt.merge(coId, sm.getMarks() != null ? sm.getMarks() : 0.0, Double::sum);
+                    }
+                    for (String coCode : coCodes) {
+                        Long coId = coIdToCode.entrySet().stream().filter(e -> e.getValue().equals(coCode)).map(Map.Entry::getKey).findFirst().orElse(null);
+                        double obt = coId != null ? coObt.getOrDefault(coId, 0.0) : 0.0;
+                        double max = coId != null ? coMaxMarksMap.getOrDefault(coId, 1.0) : 1.0;
+                        double pct = max > 0 ? r1(Math.min(100.0, obt / max * 100.0)) : 0.0;
+                        row.put(coCode, pct); coAtt.put(coCode, pct);
+                    }
+                } else {
+                    double fallbackPct = totalMax > 0 ? r1(Math.min(100.0, totalObt / totalMax * 100.0)) : 0.0;
+                    for (String c : coCodes) { row.put(c, fallbackPct); coAtt.put(c, fallbackPct); }
+                }
+
+                Map<String, Double> spa = new LinkedHashMap<>();
+                for (PO po : pos) {
+                    double ws=0, wt=0;
+                    for (CO co : coList) {
+                        int w = coPOW.getOrDefault(co.getCode(), Map.of()).getOrDefault(po.getCode(), 0);
+                        if (w > 0) {
+                            double coPct = coAtt.getOrDefault(co.getCode(), 0.0);
+                            double coLevel = coPct >= 80.0 ? 3.0 : coPct >= 60.0 ? 2.0 : 1.0;
+                            ws += coLevel * w; wt += w;
+                        }
+                    }
+                    spa.put(po.getCode(), wt > 0 ? r1(ws / wt) : 0.0);
+                }
+                row.put("poAttainment", spa);
+                double overall = totalMax > 0 ? Math.min(100.0, r1(totalObt / totalMax * 100.0)) : 0;
+                row.put("overall", overall);
+                row.put("status", overall >= 40 ? "Pass" : "At Risk");
+                students.add(row);
+            }
+            students.sort(Comparator.comparing(s -> String.valueOf(s.get("enrollmentNo"))));
+
+            return ResponseEntity.ok(Map.of(
+                "courseCode",  course.getCourseCode() != null ? course.getCourseCode() : "",
+                "courseName",  course.getCourseName() != null ? course.getCourseName() : "",
+                "coCodes",     coCodes,
+                "poHeaders",   pos.stream().map(PO::getCode).collect(Collectors.toList()),
+                "students",    students));
+
+        } catch (Exception ex) {
+            // Return a 200 with error info rather than crashing the server
+            ex.printStackTrace();
+            return ResponseEntity.ok(Map.of(
+                "error", "Failed to load student data: " + ex.getMessage(),
+                "students", List.of(), "coCodes", List.of(), "poHeaders", List.of()));
         }
-        students.sort(Comparator.comparing(s -> String.valueOf(s.get("enrollmentNo"))));
-        String finalCode = course.getCourseCode() != null ? course.getCourseCode() : "";
-        String finalName = course.getCourseName() != null ? course.getCourseName() : "";
-        return ResponseEntity.ok(Map.of("courseCode", finalCode, "courseName", finalName,
-                "coCodes", coCodes, "poHeaders", pos.stream().map(PO::getCode).collect(Collectors.toList()), "students", students));
     }
 
     @GetMapping("/verify")
@@ -447,45 +619,64 @@ public class OBEDashboardController {
         if (prog==null) return List.of();
         List<Course> courses = new ArrayList<>(courseRepository.findByProgram(prog));
         if (specializationId!=null)
-            courses = courses.stream().filter(c -> c.getSpecialization()!=null && specializationId.equals(c.getSpecialization().getId())).collect(Collectors.toList());
+            // Include BOTH spec-specific courses AND null-spec (shared/core) courses.
+            // Null-spec courses are shared across all specializations and often contain
+            // the actual mark data — excluding them causes "0 students" for all spec views.
+            courses = courses.stream()
+                .filter(c -> c.getSpecialization() == null
+                          || specializationId.equals(c.getSpecialization().getId()))
+                .collect(Collectors.toList());
         if (batchYear!=null && !batchYear.isBlank() && !batchYear.equals("all"))
             try { int fy=Integer.parseInt(batchYear);
-                courses=courses.stream().filter(c -> { if(c.getBatch()==null) return false; try { return fy==c.getBatch().getStartYear(); } catch(Exception e){return false;} }).collect(Collectors.toList());
+                courses=courses.stream().filter(c -> {
+                    if (c.getBatch()==null) return true;  // null-batch = shared/generic, always include
+                    try { return fy==c.getBatch().getStartYear(); } catch(Exception e){return false;}
+                }).collect(Collectors.toList());
             } catch (NumberFormatException ignored) {}
         return courses;
     }
 
     /**
-     * Deduplicates a list of courses by course code, preferring the entity with the most marks.
-     *
-     * GLOBAL FALLBACK: If a course entity in the list has 0 marks, this searches ALL course entities
-     * with the same code in the database to find one that has marks.
-     * This is needed because the structure parser creates one Course entity per specialization
-     * for each course code, but marks were uploaded under only one of those entities (e.g. FSD copy).
-     * The semester-filter gives us the CSE copy (correct code, wrong entity with no marks),
-     * so we replace it with the FSD/null-spec copy that actually has marks.
-     *
-     * NOTE: we preserve the original course's metadata (name, specialization) for display,
-     * only the course entity used for mark/CO/PO lookups changes.
+     * Deduplicates courses by code, picking the entity with the most marks.
+     * Uses a single bulk COUNT query instead of N individual queries → fast.
+     * Program-scoped fallback finds sibling entities with marks if the filtered pool is empty.
      */
     private List<Course> deduplicateCourses(List<Course> courses) {
+        if (courses.isEmpty()) return List.of();
+
+        // Load ALL mark counts in ONE query: courseId → markCount
+        Map<Long, Long> markCounts = new HashMap<>();
+        for (Object[] row : studentMarkRepository.countMarksByCourseIdBulk()) {
+            markCounts.put(((Number) row[0]).longValue(), ((Number) row[1]).longValue());
+        }
+
         Map<String, Course> best = new LinkedHashMap<>();
         Map<String, Long> bestCount = new HashMap<>();
         for (Course c : courses) {
             String code = c.getCourseCode();
             if (code == null) continue;
-            long cnt = studentMarkRepository.findByCourse(c).size();
-            // If this entity has no marks, search globally for a better copy
-            if (cnt == 0) {
-                List<Course> allCopies = courseRepository.findAllByCourseCode(code);
-                for (Course alt : allCopies) {
-                    long altCnt = studentMarkRepository.findByCourse(alt).size();
-                    if (altCnt > cnt) { c = alt; cnt = altCnt; }
-                }
-            }
+            long cnt = c.getId() != null ? markCounts.getOrDefault(c.getId(), 0L) : 0L;
             if (!best.containsKey(code) || cnt > bestCount.getOrDefault(code, 0L)) {
                 best.put(code, c);
                 bestCount.put(code, cnt);
+            }
+        }
+        // Program-scoped fallback: for codes still at 0, find any sibling entity with marks
+        Program prog = courses.get(0).getProgram();
+        if (prog != null) {
+            List<Course> all = courseRepository.findByProgram(prog);
+            for (Map.Entry<String, Long> e : bestCount.entrySet()) {
+                if (e.getValue() == 0) {
+                    String code = e.getKey();
+                    all.stream()
+                        .filter(c -> code.equals(c.getCourseCode()))
+                        .max(Comparator.comparingLong(c ->
+                            c.getId() != null ? markCounts.getOrDefault(c.getId(), 0L) : 0L))
+                        .ifPresent(sibling -> {
+                            long cnt = sibling.getId() != null ? markCounts.getOrDefault(sibling.getId(), 0L) : 0L;
+                            if (cnt > 0) { best.put(code, sibling); bestCount.put(code, cnt); }
+                        });
+                }
             }
         }
         return new ArrayList<>(best.values());

@@ -25,5 +25,14 @@ public class Student {
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "batch_id")
-    private Batch batch;// "ADITYA CHOUHAN"
+    private Batch batch;
+
+    /**
+     * Direct specialization link — allows fast, reliable filtering by specialization
+     * without relying on batch.specialization (which may be null for old/common batches).
+     * Populated during ZIP ingestion from the course's batch specialization.
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "specialization_id")
+    private Specialization specialization;
 }

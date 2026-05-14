@@ -233,6 +233,37 @@ tr:hover td{background:var(--bg)}
   <!-- UPLOAD -->
   <div id="view-upload" class="hidden">
     <div class="upload-grid">
+
+      <!-- NEW: Assign Student Specializations — THE CRITICAL FIRST STEP -->
+      <div class="upload-card" style="grid-column:1/-1; border-top:3px solid var(--warn); background:#fffbeb;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+          <span style="font-size:20px">🎓</span>
+          <h3 style="margin:0">Step 0 — Assign Student Specializations (Run Once)</h3>
+          <span style="background:#f59f00;color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px">REQUIRED</span>
+        </div>
+        <p>Upload the <strong>enrolment Excel file</strong> (e.g. <code>2023 24.xlsx</code>) — the file with columns: SR NO, Roll No, Student Name, Programme Name. This API reads each student's full programme name, matches it to a specialization in the database, and stamps <code>specialization_id</code> on every student record. <strong>Without this step, the specialization filter will always show all students.</strong></p>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div class="drop-zone" id="specZone" onclick="document.getElementById('specInput').click()"
+               ondragover="event.preventDefault();this.classList.add('over')"
+               ondragleave="this.classList.remove('over')"
+               ondrop="handleDrop(event,'specInput')" style="padding:14px 20px;flex:1;min-width:240px">
+            <i class="fas fa-file-excel" style="color:#f59f00"></i>
+            <p id="specLabel">Click or drag enrolment .xlsx here</p>
+            <small>e.g. "2023 24.xlsx" with Roll No + Programme columns</small>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <button class="btn-primary" id="specBtn" onclick="uploadSpecialization()" disabled style="background:var(--warn)">
+              <i class="fas fa-tags"></i> Assign Specializations
+            </button>
+            <button class="btn-primary" onclick="checkSpecStatus()" style="background:var(--text-2);font-size:11px;padding:6px 12px">
+              <i class="fas fa-info-circle"></i> Check Status
+            </button>
+          </div>
+        </div>
+        <input type="file" id="specInput" accept=".xlsx" style="display:none" onchange="onSpecFileSelect(event)">
+        <div class="upload-result" id="specResult"></div>
+      </div>
+
       <div class="upload-card">
         <h3>📊 Upload Mark Sheets</h3>
         <p>Upload a ZIP file containing Excel (.xlsx) mark sheets. Files should be named <code>COURSECODE_name_type.xlsx</code>. Supports end_term and mid_term files.</p>

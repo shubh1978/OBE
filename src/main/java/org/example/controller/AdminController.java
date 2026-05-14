@@ -24,8 +24,91 @@ public class AdminController {
     private final CO_PO_MappingRepository coPoMappingRepository;
     private final COPSORepository coPsoMappingRepository;
     private final SpecializationRepository specializationRepository;
+    private final StudentRepository studentRepository;
 
-    // ═══ PROGRAMS ════════════════════════════════════════════════
+    // ═══ STUDENT SPECIALIZATION MANAGEMENT ═══════════════════════════════════
+
+    /**
+     * GET /admin/students/unassigned-count
+     * Returns the count of students with no specialization assigned.
+     * Useful for verifying if a backfill is needed.
+     */
+    @GetMapping("/students/unassigned-count")
+    public ResponseEntity<?> getUnassignedStudentCount() {
+        long count = studentRepository.countUnassignedStudents();
+        return ResponseEntity.ok(Map.of("unassignedStudents", count, "totalStudents", studentRepository.count()));
+    }
+
+    /**
+     * POST /admin/students/assign-specialization
+     * Bulk-assigns a specialization to students by enrollment number range or prefix.
+     *
+     * Body options:
+     *   { "specializationId": 10, "enrollmentFrom": "2401830001", "enrollmentTo": "2401830060" }
+     *   { "specializationId": 10, "enrollmentPrefix": "24018" }
+     *
+     * This is how you fix existing students that were ingested before the specialization_id column existed.
+     */
+    @PostMapping("/students/assign-specialization")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> assignSpecializationToStudents(@RequestBody Map<String, Object> body) {
+        Long specializationId = toLong(body, "specializationId");
+        if (specializationId == null)
+            return ResponseEntity.badRequest().body("specializationId required");
+
+        Specialization spec = specializationRepository.findById(specializationId).orElse(null);
+        if (spec == null)
+            return ResponseEntity.badRequest().body("Specialization not found: " + specializationId);
+
+        int updated = 0;
+
+        String prefix = getStr(body, "enrollmentPrefix");
+        String from   = getStr(body, "enrollmentFrom");
+        String to     = getStr(body, "enrollmentTo");
+
+        if (prefix != null && !prefix.isBlank()) {
+            updated = studentRepository.assignSpecializationByEnrollmentPrefix(spec, prefix);
+        } else if (from != null && !from.isBlank() && to != null && !to.isBlank()) {
+            updated = studentRepository.assignSpecializationByEnrollmentRange(spec, from, to);
+        } else {
+            return ResponseEntity.badRequest().body(
+                    "Provide either 'enrollmentPrefix' or both 'enrollmentFrom' and 'enrollmentTo'");
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "specializationId", specializationId,
+                "specializationName", spec.getName(),
+                "studentsUpdated", updated));
+    }
+
+    /**
+     * POST /admin/students/backfill-specialization
+     * Auto-fills specialization_id for ALL existing students that have no specialization
+     * by reading it from their batch's specialization field.
+     * Run this once after deploying the new Student.specialization column.
+     */
+    @PostMapping("/students/backfill-specialization")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> backfillStudentSpecialization() {
+        List<org.example.entity.Student> students = studentRepository.findAll();
+        int fixed = 0, skipped = 0, noSpec = 0;
+        for (org.example.entity.Student student : students) {
+            if (student.getSpecialization() != null) { skipped++; continue; }
+            if (student.getBatch() != null && student.getBatch().getSpecialization() != null) {
+                student.setSpecialization(student.getBatch().getSpecialization());
+                studentRepository.save(student);
+                fixed++;
+            } else {
+                noSpec++;
+            }
+        }
+        return ResponseEntity.ok(Map.of(
+                "totalStudents", students.size(),
+                "alreadyHadSpec", skipped,
+                "backfilledFromBatch", fixed,
+                "stillNoSpec", noSpec));
+    }
+
 
     @GetMapping("/programs")
     public List<Map<String, Object>> getPrograms() {

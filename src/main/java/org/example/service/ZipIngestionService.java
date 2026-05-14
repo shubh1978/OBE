@@ -149,59 +149,39 @@ public class ZipIngestionService {
             Map<String, Double>  labelToMax      = new HashMap<>();
 
             // IMPROVED: Scan entire header row for question columns (not just from COL_QUESTIONS_START)
-            // This handles files where question columns might be at different positions
+            // Build a map of MAX_MARKS column index → question label for later multi-row scan
+            Map<Integer, String> maxMarksColToLabel = new HashMap<>();
+
             for (int c = 0; c < headerRow.getLastCellNum(); c++) {
                 String h = getString(headerRow.getCell(c));
                 if (h.isEmpty()) continue;
 
-                // MAX_MARKS columns → read max value from first data row
+                // MAX_MARKS columns → record column index, scan for value later (multi-row)
                 if (h.endsWith("MAX_MARKS") && !h.equals("EVENT_MAX_MARKS")) {
                     String label = h.replace("MAX_MARKS", "").trim();
-                    Row first = sheet.getRow(1);
-                    if (first != null) {
-                        double maxVal = getNumeric(first.getCell(c));
-                        if (maxVal > 0) labelToMax.put(label, maxVal);
-                    }
+                    maxMarksColToLabel.put(c, label);
                     continue;
                 }
                 // Skip ID and summary columns
                 if (h.endsWith("_ID") || h.endsWith("MARKS_ID") ||
                         h.equals("QUESTION_MARKS_SUM") || h.equals("EVENT_MAX_MARKS")) continue;
 
-                // IMPROVED: More flexible question column detection
-                // Accept columns that:
-                // 1. Start with Q + digit (Q1, Q2, Q1(a), Q1(b), etc.)
-                // 2. Contain "Question" keyword with numbers
-                // 3. Match pattern: Q followed by number, with optional spaces/separators
                 boolean isQuestionColumn = false;
                 String hUpper = h.toUpperCase().trim();
-                
+
                 // Pattern 1: Standard Q format - Q1, Q2, Q1(a), Q1(b), Q1 (5), etc.
                 if (h.matches("^Q\\s*\\d.*")) {
                     isQuestionColumn = true;
-                } 
-                // Pattern 2: Question word format - Question 1, Question 2, Question-1, etc.
+                }
+                // Pattern 2: Question word format
                 else if (hUpper.contains("QUESTION") && hUpper.matches(".*Q\\s*-?\\s*\\d+.*")) {
                     isQuestionColumn = true;
                 }
-                // Pattern 3: Just Q with number (Q-1, Q 1, etc. with separators)
+                // Pattern 3: Q with separator (Q-1, Q 1, etc.)
                 else if (h.matches("^Q[\\s\\-_]?\\d+.*")) {
                     isQuestionColumn = true;
                 }
-                // Pattern 4: Numeric only patterns (should have some indication)
-                // Exclude columns that are clearly not questions
-                else if (h.matches(".*\\d+.*") && 
-                         !h.contains("ID") && !h.contains("MAX") && !h.contains("SUM") &&
-                         !h.contains("EVENT") && !h.contains("PROGRAM") && !h.contains("BATCH") &&
-                         !h.contains("PERIOD") && !h.contains("STUDENT") && !h.contains("COURSE") &&
-                         !h.contains("VARIANT")) {
-                    // Additional validation: check if this looks like a question column
-                    // by seeing if column name is reasonable (not too long, not generic)
-                    if (h.length() <= 20 && !h.matches(".*[A-Z]{3,}.*")) {
-                        isQuestionColumn = true;
-                    }
-                }
-                
+
                 if (!isQuestionColumn) continue;
 
                 // Clean label: strip trailing " (5.0)" if present
@@ -212,6 +192,51 @@ public class ZipIngestionService {
                 Matcher maxInHeader = Pattern.compile("\\((\\d+\\.?\\d*)\\)\\s*$").matcher(h);
                 if (maxInHeader.find() && !labelToMax.containsKey(label)) {
                     labelToMax.put(label, Double.parseDouble(maxInHeader.group(1)));
+                }
+            }
+
+            // ── Multi-row scan for MAX_MARKS columns ──────────────────────────────
+            // Scan up to 20 data rows to find the first non-zero max value for each
+            // MAX_MARKS column. This handles files where row 1 has a blank/absent student.
+            for (Map.Entry<Integer, String> mEntry : maxMarksColToLabel.entrySet()) {
+                int maxCol = mEntry.getKey();
+                String label = mEntry.getValue();
+                if (labelToMax.containsKey(label)) continue; // already got it from header
+                int maxRowsToScan = Math.min(21, sheet.getLastRowNum() + 1);
+                for (int r = 1; r < maxRowsToScan; r++) {
+                    Row dataRow = sheet.getRow(r);
+                    if (dataRow == null) continue;
+                    // Skip absent rows
+                    if (!getString(dataRow.getCell(COL_ABSENT)).isEmpty()) continue;
+                    double maxVal = getNumeric(dataRow.getCell(maxCol));
+                    if (maxVal > 0) {
+                        labelToMax.put(label, maxVal);
+                        break;
+                    }
+                }
+            }
+
+            // ── Fallback: infer per-question max from actual data rows ─────────────
+            // For question columns still missing a max, scan the first 20 non-absent rows
+            // and take the maximum value seen in that column as the likely max marks.
+            // This handles files where max is not stored in a dedicated MAX_MARKS column.
+            for (Map.Entry<String, Integer> qEntry : labelToMarksCol.entrySet()) {
+                String label = qEntry.getKey();
+                if (labelToMax.containsKey(label)) continue;
+                int col = qEntry.getValue();
+                double inferredMax = 0.0;
+                int rowsScanned = 0;
+                for (int r = 1; r <= sheet.getLastRowNum() && rowsScanned < 30; r++) {
+                    Row dataRow = sheet.getRow(r);
+                    if (dataRow == null) continue;
+                    if (!getString(dataRow.getCell(COL_ABSENT)).isEmpty()) continue;
+                    rowsScanned++;
+                    double val = getNumeric(dataRow.getCell(col));
+                    if (val > inferredMax) inferredMax = val;
+                }
+                if (inferredMax > 0) {
+                    labelToMax.put(label, inferredMax);
+                    System.out.println("  [MAX_INFER] '" + label + "' max inferred from data rows: " + inferredMax);
                 }
             }
 
@@ -244,21 +269,38 @@ public class ZipIngestionService {
 
             // ── AUTO-CREATE CO AND QUESTION-CO MAPPINGS ───────────────────────
             // Map: question label → extracted CO number
-            // Q1, Q1(a), Q1(b) → CO1
+            // Q1, Q1(a), Q1(b) → CO1  (all sub-parts of Q1 map to CO1)
             // Q2, Q2(a), Q2(b) → CO2, etc.
+            // CRITICAL: only the ROOT question number determines the CO, NOT sub-parts.
+            // E.g. Q1(a) → root=1 → CO1; Q10 → root=10 → CO10.
+            // We cap at the number of DISTINCT root numbers (e.g. Q1,Q2,Q3 → 3 COs).
             Map<String, Integer> questionToCoNumber = new HashMap<>();
+            Set<Integer> distinctRootNums = new java.util.TreeSet<>();
             for (String qLabel : labelToMarksCol.keySet()) {
-                // Extract first digit from question label
-                // Q1 → 1, Q1(a) → 1, Q2(b) → 2
-                String[] parts = qLabel.replaceAll("[^0-9]", " ").trim().split("\\s+");
-                if (parts.length > 0 && !parts[0].isEmpty()) {
+                // Extract the FIRST numeric group — this is the root question number
+                // Q1 → 1, Q1(a) → 1, Q2(b) → 2, Q10 → 10
+                java.util.regex.Matcher qm = java.util.regex.Pattern.compile("^Q(\\d+)", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(qLabel.trim());
+                if (qm.find()) {
                     try {
-                        int coNum = Integer.parseInt(parts[0]);
-                        questionToCoNumber.put(qLabel, coNum);
+                        int rootNum = Integer.parseInt(qm.group(1));
+                        distinctRootNums.add(rootNum);
+                        questionToCoNumber.put(qLabel, rootNum);
                     } catch (NumberFormatException e) {
-                        // Skip questions without number prefix
+                        // Skip
                     }
                 }
+            }
+            // Re-number COs sequentially: e.g. if roots are {1,2,3} → CO1,CO2,CO3
+            // If roots are {1,3,5} → CO1,CO2,CO3 (compact sequential mapping)
+            Map<Integer, Integer> rootToSeqCo = new java.util.LinkedHashMap<>();
+            int seqCounter = 1;
+            for (int root : distinctRootNums) {
+                rootToSeqCo.put(root, seqCounter++);
+            }
+            // Replace questionToCoNumber values with sequential CO numbers
+            for (String qLabel : new ArrayList<>(questionToCoNumber.keySet())) {
+                int root = questionToCoNumber.get(qLabel);
+                questionToCoNumber.put(qLabel, rootToSeqCo.getOrDefault(root, root));
             }
 
             // ─────────────────────────────────────────────────────────────────
@@ -294,10 +336,8 @@ public class ZipIngestionService {
                 String eventName    = getString(row.getCell(COL_EVENT_NAME));
                 double eventMax     = getNumeric(row.getCell(COL_EVENT_MAX_MARKS));
 
-                // ── Resolve Course ──────────────────────────────────────────────
-                // STRICT MATCHING: only use courses that already exist in the DB
-                // (created by structure-Excel upload). Do NOT auto-create courses.
-                // This prevents phantom data for courses not in any uploaded Excel.
+                // ── Resolve Course (strict: must already exist in DB) ────────────
+                // Do course resolution FIRST so we can derive the correct batch from it
                 String courseCode = courseVariant.contains("/")
                         ? courseVariant.split("/")[0].trim()
                         : filename.split("_")[0];
@@ -315,49 +355,33 @@ public class ZipIngestionService {
                 }
 
                 // ── Resolve Batch (start_year from batchStr) ────────────────────
+                // Strategy: find the course first, then use the course's own batch.
+                // This ensures students are linked to the correct specialization batch.
                 int startYear = parseBatchStartYear(batchStr);
                 int endYear   = parseBatchEndYear(batchStr, startYear);
-                String batchKey = progName + "_" + startYear;
-                Batch batchObj = batchCache.computeIfAbsent(batchKey, k ->
-                        batchRepository.findByStartYearAndProgramAndSpecialization(startYear, program, null)
-                                .orElse(null));
-
-                if (batchObj == null) {
-                    System.out.println("  ✗ [SKIP] Batch not found in DB: " + batchKey + " — skipping row " + r);
-                    continue;
-                }
-
-                // ── Resolve Semester ────────────────────────────────────────────
-                final int semNum = semesterNum;
-                final Batch fb = batchObj;
-                Semester semester = semesterRepository.findByNumberAndBatch(semNum, fb).orElse(null);
-
-                if (semester == null) {
-                    System.out.println("  ✗ [SKIP] Semester " + semNum + " not found for batch " + batchKey + " — skipping row " + r);
-                    continue;
-                }
-
-                // ── Resolve Course (strict: must already exist in DB) ───────────
                 final Program fp = program;
-                final Semester fs = semester;
-                String courseKey = courseCode.toUpperCase() + "_" + batchKey;
+                final String finalCourseCode = courseCode.toUpperCase();
+                final int finalStartYear = startYear;
+
+                // Step 1: Find the course (by code + program, prioritize start-year match)
+                String courseKey = finalCourseCode + "_" + progName + "_" + startYear;
                 Course course = courseCache.computeIfAbsent(courseKey, k -> {
-                    // Search for existing course by code within this specific batch's semester
-                    // Primary: match by course code + same batch
-                    List<Course> batchCourses = courseRepository.findByBatch(fb);
-                    Course found = batchCourses.stream()
-                            .filter(c -> c.getCourseCode().equalsIgnoreCase(courseCode))
+                    // Primary: match by course code + program + start year (via batch)
+                    List<Course> programCourses = courseRepository.findByProgram(fp);
+                    // Prefer course whose batch start year matches
+                    Course found = programCourses.stream()
+                            .filter(c -> c.getCourseCode() != null && c.getCourseCode().equalsIgnoreCase(finalCourseCode))
+                            .filter(c -> c.getBatch() != null && c.getBatch().getStartYear() != null && c.getBatch().getStartYear() == finalStartYear)
                             .findFirst().orElse(null);
 
                     if (found != null) {
-                        System.out.println("  ✓ Matched course: " + found.getId() + " (" + found.getCourseCode() + ") in batch " + batchKey);
+                        System.out.println("  ✓ Matched course: " + found.getId() + " (" + found.getCourseCode() + ") batch_year=" + found.getBatch().getStartYear());
                         return found;
                     }
 
-                    // Fallback: match by code + program across batches (same program year range)
-                    found = courseRepository.findAll().stream()
-                            .filter(c -> c.getCourseCode().equalsIgnoreCase(courseCode))
-                            .filter(c -> c.getProgram() != null && c.getProgram().getId().equals(fp.getId()))
+                    // Fallback: any course with matching code under this program
+                    found = programCourses.stream()
+                            .filter(c -> c.getCourseCode() != null && c.getCourseCode().equalsIgnoreCase(finalCourseCode))
                             .findFirst().orElse(null);
 
                     if (found != null) {
@@ -366,13 +390,44 @@ public class ZipIngestionService {
                     }
 
                     // NOT FOUND — do NOT auto-create; return null to skip
-                    System.out.println("  ✗ [REJECT] Course '" + courseCode + "' not found in DB for program '" + fp.getName() + "'. " +
+                    System.out.println("  ✗ [REJECT] Course '" + finalCourseCode + "' not found in DB for program '" + fp.getName() + "'. " +
                             "Upload the structure Excel first. Skipping marks for this course.");
                     return null;
                 });
 
                 if (course == null) {
                     // Course not in DB — skip all rows for this course variant
+                    continue;
+                }
+
+                // Step 2: Derive the batch from the course itself
+                // This ensures students are linked to the correct specialization batch.
+                Batch batchObj = course.getBatch();
+                if (batchObj == null) {
+                    // Fallback: look up using null-spec batch
+                    String batchKey = progName + "_" + startYear;
+                    batchObj = batchCache.computeIfAbsent(batchKey, k ->
+                            batchRepository.findByStartYearAndProgramAndSpecialization(startYear, program, null)
+                                    .orElse(null));
+                }
+
+                if (batchObj == null) {
+                    System.out.println("  ✗ [SKIP] Batch not found for course " + courseCode + " — skipping row " + r);
+                    continue;
+                }
+
+                // ── Resolve Semester ────────────────────────────────────────────
+                // Use the course's own semester directly (already correct)
+                Semester semester = course.getSemester();
+                if (semester == null) {
+                    // Fallback: look up by number + batch
+                    final int semNum2 = semesterNum;
+                    final Batch fb2 = batchObj;
+                    semester = semesterRepository.findByNumberAndBatch(semNum2, fb2).orElse(null);
+                }
+
+                if (semester == null) {
+                    System.out.println("  ✗ [SKIP] Semester not found for course " + courseCode + " — skipping row " + r);
                     continue;
                 }
 
@@ -396,25 +451,28 @@ public class ZipIngestionService {
                     
                     if (!mappingCache.containsKey(mappingKey)) {
                         try {
-                            // Get or create CO
-                            String coCode = "CO" + coNum;
-                            CO co = coRepository.findByCodeAndCourse(coCode, finalCourse)
+                            // CO code format: COURSECODE-CON  (matches structure-parser format)
+                            // e.g. "ENBC101-CO1"  — NOT just "CO1" which creates orphaned duplicates
+                            String shortCode = "CO" + coNum;
+                            String fullCode  = finalCourse.getCourseCode() + "-CO" + coNum;
+                            // Search: full code first, then short code (backward compat), then create
+                            CO co = coRepository.findByCodeAndCourse(fullCode, finalCourse)
+                                    .orElseGet(() -> coRepository.findByCodeAndCourse(shortCode, finalCourse)
                                     .orElseGet(() -> {
                                         CO newCO = new CO();
-                                        newCO.setCode(coCode);
+                                        newCO.setCode(fullCode);   // always persist with full code
                                         newCO.setDescription("Auto-created from question mapping");
                                         newCO.setCourse(finalCourse);
                                         return coRepository.save(newCO);
-                                    });
+                                    }));
                             
-                            // Check if mapping already exists
-                            List<QuestionCOMapping> existing = questionCOMappingRepository.findAll().stream()
-                                    .filter(m -> m.getCourse().getId().equals(finalCourse.getId()) &&
-                                               m.getQuestionLabel().equalsIgnoreCase(qLabel) &&
-                                               m.getCo().getId().equals(co.getId()))
-                                    .toList();
+                            // Check if mapping already exists using proper DB query (not loadAll)
+                            // This avoids N+1 and unnecessary memory consumption
+                            boolean mappingExists = questionCOMappingRepository.findByCourseId(finalCourse.getId()).stream()
+                                    .anyMatch(m -> m.getQuestionLabel().equalsIgnoreCase(qLabel) &&
+                                                   m.getCo().getId().equals(co.getId()));
                             
-                            if (existing.isEmpty()) {
+                            if (!mappingExists) {
                                 QuestionCOMapping mapping = new QuestionCOMapping();
                                 mapping.setCourse(finalCourse);
                                 mapping.setQuestionLabel(qLabel);
@@ -422,6 +480,9 @@ public class ZipIngestionService {
                                 mapping.setMaxMarks(maxMarks);
                                 questionCOMappingRepository.save(mapping);
                                 mappingCache.put(mappingKey, mapping);
+                            } else {
+                                // Mapping already exists — just add to cache for this file
+                                mappingCache.put(mappingKey, null);
                             }
                         } catch (Exception e) {
                             // Log but don't fail the entire upload
@@ -433,16 +494,36 @@ public class ZipIngestionService {
                 // ── Resolve Student ───────────────────────────────────────────
                 final Program fprog = program;
                 final Batch fbo = batchObj;
-                Student student = studentCache.computeIfAbsent(enrollmentNo, id ->
-                        studentRepository.findByEnrollmentNumber(id)
-                                .orElseGet(() -> {
-                                    Student s = new Student();
-                                    s.setEnrollmentNumber(id);
-                                    s.setName(studentName);
-                                    s.setProgram(fprog);
-                                    s.setBatch(fbo);
-                                    return studentRepository.save(s);
-                                }));
+                // Specialization resolution priority:
+                //   1. Course's own batch specialization (if not null)
+                //   2. Parsed from the program name string in column 19
+                // This ensures students from shared/common courses (where batch.spec=null)
+                // still get their correct specialization set during ingestion.
+                Specialization courseSpec = (fbo != null) ? fbo.getSpecialization() : null;
+                // NOTE: Do NOT resolve spec from the program string in the marks Excel.
+                // The program column in marks files is unreliable (e.g. vendor name "IMAGINXP"
+                // for the whole batch incorrectly tags all students as UX/UI).
+                // Specialization is assigned AFTER marks upload, by uploading the enrollment
+                // Excel via POST /students/assign-specialization.
+                final Specialization finalSpec = courseSpec;
+                Student student = studentCache.computeIfAbsent(enrollmentNo, id -> {
+                    Student existing = studentRepository.findByEnrollmentNumber(id).orElse(null);
+                    if (existing != null) {
+                        // Update specialization if not yet set OR if we now have a better one
+                        if (existing.getSpecialization() == null && finalSpec != null) {
+                            existing.setSpecialization(finalSpec);
+                            return studentRepository.save(existing);
+                        }
+                        return existing;
+                    }
+                    Student s = new Student();
+                    s.setEnrollmentNumber(id);
+                    s.setName(studentName);
+                    s.setProgram(fprog);
+                    s.setBatch(fbo);
+                    s.setSpecialization(finalSpec);
+                    return studentRepository.save(s);
+                });
 
                 // ── Create one StudentMark per question ───────────────────────
                 for (Map.Entry<String, Integer> qe : labelToMarksCol.entrySet()) {
@@ -511,6 +592,100 @@ public class ZipIngestionService {
 
     private Program newProgram(String name) {
         Program p = new Program(); p.setName(name); return p;
+    }
+
+    /**
+     * Resolve a Specialization from the full program name string in the marks Excel.
+     * E.g. "BCA (H) (Sp AI & DS) (Research)" → BCA specialization "Artificial Intelligence and Data Science"
+     *      "B.Tech CSE (AI & ML) Samatrix"    → BTech specialization "Artificial Intelligence and Machine Learning"
+     *      "B.Tech CSE"                        → null (no specialization)
+     *      "B.Sc. (H) Cyber Security"          → BSc specialization "Cyber Security"
+     *
+     * Falls back to null (no spec) if no match found — the student can be manually
+     * assigned later via the enrolment-Excel upload endpoint.
+     */
+    private Specialization resolveSpecFromProgramString(String programStr, Program program) {
+        if (programStr == null || program == null) return null;
+        String lower = programStr.toLowerCase();
+
+        // Ordered from most-specific to least-specific so we don't match "data science"
+        // before "artificial intelligence and data science".
+        String[][] patterns = {
+            {"artificial intelligence and data science",  "Artificial Intelligence and Data Science"},
+            {"ai & ds",                                   "Artificial Intelligence and Data Science"},
+            {"ai and ds",                                 "Artificial Intelligence and Data Science"},
+            {"sp ai",                                     "Artificial Intelligence and Data Science"},
+            {"artificial intelligence and machine learning", "Artificial Intelligence and Machine Learning"},
+            {"ai & ml",                                   "Artificial Intelligence and Machine Learning"},
+            {"ai and ml",                                 "Artificial Intelligence and Machine Learning"},
+            {"samatrix",                                  "Artificial Intelligence and Machine Learning"},
+            {"sp inv",                                    "Artificial Intelligence and Machine Learning"},
+            {"full stack",                                "Full Stack Development"},
+            {"xebia",                                     "Full Stack Development"},
+            {"cyber security",                            "Cyber Security"},
+            {"ec-council",                                "Cyber Security"},
+            {"data science",                              "Data Science"},
+            {"ibm",                                       "Data Science"},
+            {"ux or ui",                                  "UX/UI"},
+            {"ux/ui",                                     "UX/UI"},
+            {"imaginxp",                                  "UX/UI"},
+            {"computer science",                          "Computer Science"},
+        };
+
+        for (String[] pair : patterns) {
+            if (lower.contains(pair[0])) {
+                String specName = pair[1];
+                // Look up by name AND program to avoid cross-program matches
+                try {
+                    return specializationRepository.findByNameAndProgram(specName, program).orElse(
+                        // Try case-insensitive partial match
+                        specializationRepository.findByProgram(program).stream()
+                            .filter(s -> s.getName() != null &&
+                                         s.getName().toLowerCase().contains(specName.toLowerCase()))
+                            .findFirst().orElse(null)
+                    );
+                } catch (Exception e) {
+                    System.err.println("Warning: spec lookup failed for '" + specName + "': " + e.getMessage());
+                }
+            }
+        }
+        return null; // No match — null spec = shared/base program
+    }
+
+    /**
+     * Derive a Specialization from the 2-digit code at enrollment-number positions 4-5.
+     * E.g. "10"/"11"/"12" → AI & ML, "17"/"18" → Full Stack, "40"/"41" → Cyber Security.
+     * Codes "01" (plain BTech CSE), "20" (plain BCA), "73" (plain BSc CS) map to null
+     * because there is no specific sub-specialization for those students.
+     */
+    private Specialization resolveSpecFromEnrollmentCode(String code, Program program) {
+        if (code == null || program == null) return null;
+        Map<String, String> codeToSpec = new java.util.HashMap<>();
+        codeToSpec.put("10", "Artificial Intelligence and Machine Learning");
+        codeToSpec.put("11", "Artificial Intelligence and Machine Learning");
+        codeToSpec.put("12", "Artificial Intelligence and Machine Learning");
+        codeToSpec.put("17", "Full Stack Development");
+        codeToSpec.put("18", "Full Stack Development");
+        codeToSpec.put("19", "Data Science");
+        codeToSpec.put("40", "Cyber Security");
+        codeToSpec.put("41", "Cyber Security");
+        codeToSpec.put("42", "UX/UI");
+        codeToSpec.put("21", "Artificial Intelligence and Data Science");
+        codeToSpec.put("83", "Cyber Security");
+        codeToSpec.put("84", "Data Science");
+        // codes "01", "20", "73" = plain program, no sub-specialization
+        String specName = codeToSpec.get(code);
+        if (specName == null) return null;
+        try {
+            return specializationRepository.findByNameAndProgram(specName, program)
+                .orElseGet(() -> specializationRepository.findByProgram(program).stream()
+                    .filter(s -> s.getName() != null &&
+                                 s.getName().toLowerCase().contains(specName.toLowerCase()))
+                    .findFirst().orElse(null));
+        } catch (Exception e) {
+            System.err.println("Warning: spec lookup by enroll code '" + code + "' failed: " + e.getMessage());
+            return null;
+        }
     }
 
     /** "ENGINEERING CALCULUS" → "Engineering Calculus", "engineering calculus" → "Engineering Calculus" */

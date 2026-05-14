@@ -26,6 +26,11 @@ public class AttainmentService {
     private final COPSORepository coPsoMappingRepository;
     private final CORepository coRepository;
     private final CourseRepository courseRepository;
+    private final org.example.repository.SpecializationRepository specializationRepository;
+    private final org.example.util.EnrollmentCodeUtil enrollmentCodeUtil;
+
+    // Static map and getEnrollmentCodesForSpecId() removed.
+    // Use enrollmentCodeUtil.getEnrollmentCodesForSpecId() instead (single source of truth).
 
     /**
      * Calculate overall CO attainment for a course (combines mid-term and end-term).
@@ -43,7 +48,21 @@ public class AttainmentService {
      * Returns: Map<coCode, level>  where level is 0, 1, 2, or 3.
      */
     public Map<String, Double> calculateCOAttainment(Long courseId) {
-        List<StudentMark> marks = studentMarkRepository.findByCourseId(courseId);
+        return calculateCOAttainment(courseId, null);
+    }
+
+    /**
+     * Calculate CO attainment scoped to a specific specialization.
+     * When specializationId is non-null, only marks from students with that
+     * specialization_id are included — giving per-specialization attainment.
+     */
+    public Map<String, Double> calculateCOAttainment(Long courseId, Long specializationId) {
+        List<StudentMark> marks;
+        if (specializationId != null) {
+            marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
+        } else {
+            marks = studentMarkRepository.findByCourseId(courseId);
+        }
         List<QuestionCOMapping> mappings = questionCOMappingRepository.findByCourseId(courseId);
 
         if (marks.isEmpty() || mappings.isEmpty()) {
@@ -197,7 +216,33 @@ public class AttainmentService {
             coAttainment.put(coCode, Math.round(passingPercent * 10.0) / 10.0);
         }
 
-        return coAttainment;
+        // ── Deduplicate: prefer full-code (ENCS101-CO1) over short-code (CO1) ─────
+        // When both formats exist (legacy + new ingestion), remove the short form.
+        Map<String, Double> deduped = new LinkedHashMap<>();
+        // Collect all suffix→fullCode so we can detect duplicates
+        Map<String, String> suffixToFullCode = new LinkedHashMap<>();
+        for (String code : coAttainment.keySet()) {
+            String suffix = extractCOSuffix(code);
+            String existing = suffixToFullCode.get(suffix);
+            // Prefer the longer code (full code wins over short code)
+            if (existing == null || code.length() > existing.length()) {
+                suffixToFullCode.put(suffix, code);
+            }
+        }
+        // Build final deduped map using only the winning code per suffix
+        for (Map.Entry<String, String> e : suffixToFullCode.entrySet()) {
+            String winCode = e.getValue();
+            deduped.put(winCode, coAttainment.get(winCode));
+        }
+        // Sort by CO number
+        List<Map.Entry<String, Double>> sorted = new ArrayList<>(deduped.entrySet());
+        sorted.sort(Comparator.comparingInt(e -> {
+            try { return Integer.parseInt(extractCOSuffix(e.getKey()).replaceAll("\\D+", "")); }
+            catch (Exception ex) { return 999; }
+        }));
+        Map<String, Double> result2 = new LinkedHashMap<>();
+        for (Map.Entry<String, Double> e : sorted) result2.put(e.getKey(), e.getValue());
+        return result2;
     }
 
     /**
@@ -223,7 +268,12 @@ public class AttainmentService {
      * @return Map of CO code -> level (1-3)
      */
     public Map<String, Integer> getCOLevels(Long courseId) {
-        Map<String, Double> coAttainments = calculateCOAttainment(courseId);
+        return getCOLevels(courseId, null);
+    }
+
+    /** CO levels scoped to a specialization. */
+    public Map<String, Integer> getCOLevels(Long courseId, Long specializationId) {
+        Map<String, Double> coAttainments = calculateCOAttainment(courseId, specializationId);
         Map<String, Integer> levels = new LinkedHashMap<>();
         for (Map.Entry<String, Double> entry : coAttainments.entrySet()) {
             levels.put(entry.getKey(), (int) percentToLevel(entry.getValue()));
@@ -231,12 +281,42 @@ public class AttainmentService {
         return levels;
     }
 
-    /**
-     * Get the total number of distinct students who have marks for this course.
-     */
+    /** Distinct student count for a course (all students). */
     public int getStudentCount(Long courseId) {
         List<StudentMark> marks = studentMarkRepository.findByCourseId(courseId);
         return (int) marks.stream().map(m -> m.getStudent().getId()).distinct().count();
+    }
+
+    /** Distinct student count for a course scoped to a specialization. */
+    public int getStudentCountBySpec(Long courseId, Long specializationId) {
+        List<StudentMark> marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
+        return (int) marks.stream().map(m -> m.getStudent().getId()).distinct().count();
+    }
+
+    /**
+     * Count of at-risk students (< 40% total marks) for a course,
+     * optionally scoped to a specialization.
+     */
+    public int getAtRiskCount(Long courseId, Long specializationId) {
+        List<StudentMark> marks;
+        if (specializationId != null) {
+            marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
+        } else {
+            marks = studentMarkRepository.findByCourseId(courseId);
+        }
+        Map<Long, List<StudentMark>> byStudent = new java.util.HashMap<>();
+        for (StudentMark sm : marks) {
+            byStudent.computeIfAbsent(sm.getStudent().getId(), k -> new ArrayList<>()).add(sm);
+        }
+        int atRisk = 0;
+        for (List<StudentMark> sms : byStudent.values()) {
+            double got = sms.stream().filter(sm -> sm.getMaxMarks() != null && sm.getMaxMarks() > 0)
+                    .mapToDouble(sm -> sm.getMarks() != null ? sm.getMarks() : 0).sum();
+            double max = sms.stream().filter(sm -> sm.getMaxMarks() != null && sm.getMaxMarks() > 0)
+                    .mapToDouble(StudentMark::getMaxMarks).sum();
+            if (max > 0 && (got / max) < 0.40) atRisk++;
+        }
+        return atRisk;
     }
 
     /**
@@ -264,13 +344,11 @@ public class AttainmentService {
      * PO attainment = weighted average of CO attainments (0-3 scale)
      */
     public Map<String, Double> calculatePOAttainment(Long courseId) {
-        System.out.println("\n╔════════════════════════════════════════════════════════════╗");
-        System.out.println("║        [PO_ATTAINMENT] Starting PO attainment calculation    ║");
-        System.out.println("╚════════════════════════════════════════════════════════════╝");
-        System.out.println("[PO_DEBUG] Course ID: " + courseId);
-        
-        Map<String, Double> coAttainments = calculateCOAttainment(courseId);
-        System.out.println("[PO_DEBUG] CO Attainments retrieved: " + coAttainments);
+        return calculatePOAttainment(courseId, null);
+    }
+
+    public Map<String, Double> calculatePOAttainment(Long courseId, Long specializationId) {
+        Map<String, Double> coAttainments = calculateCOAttainment(courseId, specializationId);
 
         if (coAttainments.isEmpty()) {
             System.out.println("[PO_DEBUG] ⚠️  CO Attainments is EMPTY - returning empty map");
@@ -355,13 +433,11 @@ public class AttainmentService {
      * PSO attainment = weighted average of CO attainments (0-3 scale)
      */
     public Map<String, Double> calculatePSOAttainment(Long courseId) {
-        System.out.println("\n╔════════════════════════════════════════════════════════════╗");
-        System.out.println("║        [PSO_ATTAINMENT] Starting PSO attainment calculation   ║");
-        System.out.println("╚════════════════════════════════════════════════════════════╝");
-        System.out.println("[PSO_DEBUG] Course ID: " + courseId);
-        
-        Map<String, Double> coAttainments = calculateCOAttainment(courseId);
-        System.out.println("[PSO_DEBUG] CO Attainments retrieved: " + coAttainments);
+        return calculatePSOAttainment(courseId, null);
+    }
+
+    public Map<String, Double> calculatePSOAttainment(Long courseId, Long specializationId) {
+        Map<String, Double> coAttainments = calculateCOAttainment(courseId, specializationId);
 
         if (coAttainments.isEmpty()) {
             System.out.println("[PSO_DEBUG] ⚠️  CO Attainments is EMPTY - returning empty map");
@@ -577,62 +653,75 @@ public class AttainmentService {
     }
 
     /**
-     * Calculate individual student CO attainment (both mid+end term combined)
+     * Calculate individual student CO attainment (both mid+end term combined).
+     * Uses a pre-built lookup map (O(1) per mark) instead of stream-filter (O(n) per mark).
      */
     public Map<Long, Map<String, Double>> calculateIndividualStudentCOAttainment(Long courseId) {
-        List<StudentMark> marks = studentMarkRepository.findByCourseId(courseId);
+        // Use JOIN FETCH query to avoid lazy-loading student inside the loop
+        List<StudentMark> marks = studentMarkRepository.findByCourseIdWithStudent(courseId);
         List<QuestionCOMapping> mappings = questionCOMappingRepository.findByCourseId(courseId);
 
         if (marks.isEmpty() || mappings.isEmpty()) {
             return new HashMap<>();
         }
 
-        // Map: studentId -> coId -> max marks possible
-        Map<Long, Map<Long, Double>> coMaxMarksByStudent = new HashMap<>();
-        // Map: studentId -> coId -> total marks obtained
-        Map<Long, Map<Long, Double>> studentCOMarks = new HashMap<>();
-        // Map: coId -> max marks possible
-        Map<Long, Double> coMaxMarksGlobal = new HashMap<>();
-
-        // Build CO max marks
-        for (QuestionCOMapping q : mappings) {
-            Long coId = q.getCo().getId();
-            coMaxMarksGlobal.putIfAbsent(coId, 0.0);
-            coMaxMarksGlobal.put(coId, coMaxMarksGlobal.get(coId) + q.getMaxMarks());
+        // ── Pre-load CO code map ONCE (avoids N+1: was doing coRepository.findById inside loop) ──
+        List<CO> courseCoList = coRepository.findByCourseId(courseId);
+        Map<Long, String> coIdToCode = new HashMap<>(courseCoList.size() * 2);
+        for (CO co : courseCoList) {
+            coIdToCode.put(co.getId(), co.getCode());
         }
 
-        // Aggregate per student
-        for (StudentMark mark : marks) {
-            Optional<QuestionCOMapping> map = mappings.stream()
-                    .filter(m -> m.getQuestionLabel().equalsIgnoreCase(mark.getQuestion()))
-                    .findFirst();
-
-            if (map.isPresent()) {
-                Long coId = map.get().getCo().getId();
-                Long studentId = mark.getStudent().getId();
-
-                coMaxMarksByStudent.computeIfAbsent(studentId, k -> new HashMap<>())
-                        .put(coId, coMaxMarksGlobal.getOrDefault(coId, 0.0));
-
-                studentCOMarks.computeIfAbsent(studentId, k -> new HashMap<>())
-                        .merge(coId, mark.getMarks(), Double::sum);
+        // ── Build O(1) lookup: UPPERCASE(questionLabel) → QuestionCOMapping ──────
+        Map<String, QuestionCOMapping> labelToMapping = new HashMap<>();
+        for (QuestionCOMapping q : mappings) {
+            if (q.getQuestionLabel() != null) {
+                labelToMapping.put(q.getQuestionLabel().toUpperCase(), q);
             }
         }
 
-        // Calculate per-student attainment
+        // ── Build coMaxMarksGlobal: coId → total max marks ─────────────────────
+        Map<Long, Double> coMaxMarksGlobal = new HashMap<>();
+        for (QuestionCOMapping q : mappings) {
+            coMaxMarksGlobal.merge(q.getCo().getId(), q.getMaxMarks(), Double::sum);
+        }
+
+        // Map: studentId → coId → total marks obtained
+        Map<Long, Map<Long, Double>> studentCOMarks     = new HashMap<>();
+        // Map: studentId → coId → max possible for that student
+        Map<Long, Map<Long, Double>> coMaxMarksByStudent = new HashMap<>();
+
+        // Aggregate per student using O(1) lookup (no DB calls inside this loop)
+        for (StudentMark mark : marks) {
+            String qUpper = mark.getQuestion() != null ? mark.getQuestion().toUpperCase() : "";
+            QuestionCOMapping mapping = labelToMapping.get(qUpper);
+            if (mapping == null) continue;
+
+            Long coId      = mapping.getCo().getId();
+            Long studentId = mark.getStudent().getId();
+
+            coMaxMarksByStudent.computeIfAbsent(studentId, k -> new HashMap<>())
+                    .put(coId, coMaxMarksGlobal.getOrDefault(coId, 0.0));
+
+            studentCOMarks.computeIfAbsent(studentId, k -> new HashMap<>())
+                    .merge(coId, mark.getMarks(), Double::sum);
+        }
+
+        // Calculate per-student attainment percentages
+        // No DB calls here — all CO data pre-loaded above
         Map<Long, Map<String, Double>> result = new LinkedHashMap<>();
         for (Long studentId : studentCOMarks.keySet()) {
             Map<String, Double> studentAttainment = new HashMap<>();
             Map<Long, Double> studentMarks = studentCOMarks.get(studentId);
-            Map<Long, Double> maxMarks = coMaxMarksByStudent.get(studentId);
+            Map<Long, Double> maxMarks     = coMaxMarksByStudent.get(studentId);
 
             for (Long coId : studentMarks.keySet()) {
-                double obtained = studentMarks.get(coId);
-                double max = maxMarks.getOrDefault(coId, 1.0);
-                double percentage = (obtained / max) * 100.0;
+                double obtained   = studentMarks.get(coId);
+                double max        = maxMarks.getOrDefault(coId, 1.0);
+                double percentage = max > 0 ? (obtained / max) * 100.0 : 0.0;
 
-                CO co = coRepository.findById(coId).orElse(null);
-                String coCode = co != null ? co.getCode() : "CO" + coId;
+                // Look up coCode from pre-loaded map — no DB query
+                String coCode = coIdToCode.getOrDefault(coId, "CO" + coId);
                 studentAttainment.put(coCode, percentage);
             }
             result.put(studentId, studentAttainment);
@@ -640,6 +729,7 @@ public class AttainmentService {
 
         return result;
     }
+
 
     /**
      * Get CO-PO mapping matrix for display (weights for each CO-PO pair)

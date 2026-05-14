@@ -22,6 +22,13 @@ public interface CourseRepository extends JpaRepository<Course, Long> {
     // Use @Query to find by semester ID directly — avoids JPA object equality issues
     @org.springframework.data.jpa.repository.Query("SELECT c FROM Course c WHERE c.semester.id = :semesterId")
     List<Course> findBySemesterId(@org.springframework.data.repository.query.Param("semesterId") Long semesterId);
+
+    /** Filter by BOTH program and semester — prevents cross-program course leakage in the dropdown. */
+    @org.springframework.data.jpa.repository.Query("SELECT c FROM Course c WHERE c.program.id = :programId AND c.semester.id = :semesterId")
+    List<Course> findByProgramIdAndSemesterId(
+            @org.springframework.data.repository.query.Param("programId") Long programId,
+            @org.springframework.data.repository.query.Param("semesterId") Long semesterId);
+
     Optional<Course> findFirstByCourseCode(String courseCode);
     List<Course> findAllByCourseCode(String courseCode);
 

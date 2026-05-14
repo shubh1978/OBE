@@ -1,5 +1,16 @@
 // ═══ CONFIG ═══════════════════════════════════════════════════
-const API = 'https://obe-9sxe.onrender.com';
+// Auto-detect server:
+//   port 8080  → Spring Boot is serving the page → use relative URL
+//   port 5500  → VS Code Live Server → point directly to Spring Boot at :8080
+//   other host → Production (Render)
+const API = (function() {
+    const h = window.location.hostname;
+    const p = window.location.port;
+    if (h === 'localhost' || h === '127.0.0.1') {
+        return p === '8080' ? '' : 'http://localhost:8080';
+    }
+    return 'https://obe-9sxe.onrender.com';
+})();
 
 // ═══ STATE ════════════════════════════════════════════════════
 const S = { programId: null, batchYear: null, specId: null, semesterId: null, courseFilter: null, data: null };
@@ -48,7 +59,8 @@ function switchTab(name, btn) {
     }
     document.getElementById('empty-state').classList.add('hidden');
     document.getElementById('view-' + name).classList.remove('hidden');
-    if (name === 'mapping' && S.data) renderMapping(S.data.courses || []);
+    // Mapping tab uses allCourses (includes courses without marks) so CO-PO data is always shown
+    if (name === 'mapping' && S.data) renderMapping(S.data.allCourses || S.data.courses || []);
 }
 
 // ═══ FILTERS ══════════════════════════════════════════════════
@@ -133,31 +145,34 @@ async function loadDashboard() {
             : courseList;
         const totalAllCourses = filtered.length;
 
-        // ── Step 2: fetch CO, PO, PSO attainment + CO levels for each course
+        // ── Step 2: fetch CO, PO, PSO attainment + CO levels + at-risk for each course
+        // Pass specializationId so attainment is computed from spec-filtered students only
         const attainments = await Promise.all(filtered.map(function(c) {
+            const specParam = S.specId ? '?specializationId=' + S.specId : '';
             return Promise.all([
-                get('/api/attainment/co/' + c.id).catch(function() { return {}; }),
-                get('/api/attainment/po/' + c.id).catch(function() { return {}; }),
-                get('/api/attainment/pso/' + c.id).catch(function() { return {}; }),
+                get('/api/attainment/co/' + c.id + specParam).catch(function() { return {}; }),
+                get('/api/attainment/po/' + c.id + specParam).catch(function() { return {}; }),
+                get('/api/attainment/pso/' + c.id + specParam).catch(function() { return {}; }),
                 get('/api/attainment/co-po-mapping/' + c.id).catch(function() { return []; }),
                 get('/api/attainment/co-pso-mapping/' + c.id).catch(function() { return []; }),
-                get('/api/attainment/co-levels/' + c.id).catch(function() { return {}; })
+                get('/api/attainment/co-levels/' + c.id + specParam).catch(function() { return {}; }),
+                get('/api/attainment/at-risk/' + c.id + specParam).catch(function() { return { atRiskCount: 0 }; })
             ]).then(function(results) {
-                return { co: results[0], po: results[1], pso: results[2], coPoMatrix: results[3], coPsoMatrix: results[4], coLevels: results[5] };
+                return { co: results[0], po: results[1], pso: results[2], coPoMatrix: results[3], coPsoMatrix: results[4], coLevels: results[5], atRiskCount: results[6].atRiskCount || 0 };
             }).catch(function() {
-                return { co: {}, po: {}, pso: {}, coPoMatrix: [], coPsoMatrix: [], coLevels: {} };
+                return { co: {}, po: {}, pso: {}, coPoMatrix: [], coPsoMatrix: [], coLevels: {}, atRiskCount: 0 };
             });
         }));
 
         // ── Step 3: build unified data structure ─────────────────
-        const courses = filtered.map(function(c, idx) {
+        let courses = filtered.map(function(c, idx) {
             const coMap = attainments[idx].co || {};
             const poMap = attainments[idx].po || {};
             const psoMap = attainments[idx].pso || {};
             const coLevelMap = attainments[idx].coLevels || {};
             const target = 40.0;
 
-            const coAttainments = Object.entries(coMap).map(function(e) {
+            const coAttainments = Object.entries(coMap).filter(function(e) { return e[1] > 0; }).map(function(e) {
                 return {
                     co: e[0],
                     description: e[0],
@@ -203,19 +218,28 @@ async function loadDashboard() {
                 coAttainments: coAttainments, coLevels: coLevelMap, examLoaded: false,
                 poHeaders: poHeaders, poAttainment: poAttainment,
                 psoHeaders: psoHeaders, psoAttainment: psoAttainment,
+                atRiskCount: attainments[idx].atRiskCount || 0,
                 coPoMatrix: attainments[idx].coPoMatrix || [], coPsoMatrix: attainments[idx].coPsoMatrix || []
             };
         });
 
-        const overallAtt = courses.length
-            ? Math.round(courses.filter(function(c) { return c.avgAttainment > 0; })
+        // allCourses: every course returned by the filter (used for CO-PO mapping tab).
+        // Includes courses with CO-PO definitions but no marks yet uploaded.
+        const allCourses = courses.slice();
+
+        // dashboardCourses: only courses that have student marks — used for the
+        // performance cards, KPI tiles, and Student Performance tab.
+        const dashboardCourses = courses.filter(function(c) { return c.studentCount > 0; });
+
+        const overallAtt = dashboardCourses.length
+            ? Math.round(dashboardCourses.filter(function(c) { return c.avgAttainment > 0; })
                 .reduce(function(s, c) { return s + c.avgAttainment; }, 0)
-                / Math.max(1, courses.filter(function(c) { return c.avgAttainment > 0; }).length) * 10) / 10
+                / Math.max(1, dashboardCourses.filter(function(c) { return c.avgAttainment > 0; }).length) * 10) / 10
             : 0;
 
-        // Collect PO/PSO attainments across courses
+        // Collect PO/PSO attainments across courses with marks only
         const branchPoAtt = {}, branchPsoAtt = {};
-        courses.forEach(function(course) {
+        dashboardCourses.forEach(function(course) {
             Object.entries(course.poAttainment).forEach(function(e) {
                 if (!branchPoAtt[e[0]]) branchPoAtt[e[0]] = [];
                 branchPoAtt[e[0]].push(e[1]);
@@ -234,24 +258,31 @@ async function loadDashboard() {
             branchPsoAttainment[e[0]] = Math.round(e[1].reduce(function(a,b) { return a+b; }, 0) / e[1].length * 10) / 10;
         });
 
-        // Total students = sum of distinct students across all courses with marks
-        const totalStudents = courses.reduce(function(sum, c) { return sum + c.studentCount; }, 0);
-        const coursesWithMarks = courses.filter(function(c) { return c.coAttainments.length > 0; }).length;
+        // "Students Evaluated" = max across courses (students appear in multiple courses — don't sum)
+        const totalStudents = dashboardCourses.reduce(function(max, c) { return Math.max(max, c.studentCount); }, 0);
+        const totalAtRisk = dashboardCourses.reduce(function(max, c) { return Math.max(max, c.atRiskCount); }, 0);
+
+        const coursesWithMarksCount = dashboardCourses.filter(function(c) { return c.coAttainments.length > 0; }).length;
 
         const d = {
-            courses: courses,
-            totalCourses: coursesWithMarks,
+            // courses: used for dashboard cards + Student Performance tab (marks only)
+            courses: dashboardCourses,
+            // allCourses: used for CO-PO mapping tab (includes courses without marks)
+            allCourses: allCourses,
+            totalCourses: coursesWithMarksCount,
             totalAllCourses: totalAllCourses,
             totalStudents: totalStudents,
-            atRiskStudents: 0,
+            atRiskStudents: totalAtRisk,
             overallAttainment: overallAtt,
             branchPoAttainment: branchPoAttainment,
             branchPsoAttainment: branchPsoAttainment
         };
         S.data = d;
         renderDashboard(d);
+        // Course filter dropdown: show courses with marks (for student tab)
         fillCourseDropdowns(d.courses || []);
-        if (currentTab === 'mapping') renderMapping(d.courses || []);
+        // Mapping tab: always use allCourses so CO-PO data shows even without marks
+        if (currentTab === 'mapping') renderMapping(d.allCourses || []);
     } catch (e) { console.error('loadDashboard', e); }
 }
 
@@ -273,8 +304,8 @@ function renderDashboard(d) {
             allCOsFlat.push(Object.assign({}, co, { course: c.courseCode, courseName: c.courseName, courseIdx: ci }));
         });
     });
-    const atRisk = allCOsFlat.filter(function(co) { return co.attainment < 40; }).length;
-    document.getElementById('kpi-risk').textContent = atRisk;
+    // Users requested to show number of at risk students here instead of COs.
+    document.getElementById('kpi-risk').textContent = d.atRiskStudents != null ? d.atRiskStudents : '—';
 
     // ── Bar chart: one color per course, dashed line for target ────────
     if (barChart) barChart.destroy();
@@ -578,8 +609,11 @@ async function loadStudents() {
     if (!courseId) { el.innerHTML = ''; return; }
     el.innerHTML = '<div style="text-align:center;padding:30px;color:var(--text-3)">Loading...</div>';
     try {
-        // Use courseId for exact course entity match (avoids findFirstByCourseCode wrong-batch bug)
+        // Use courseId for exact course entity match.
+        // Pass specializationId so common courses (e.g. ENMA101) show only the
+        // selected specialization's ~50 students instead of all 1123 BTech students.
         let url = '/dashboard/students?courseId=' + encodeURIComponent(courseId);
+        if (S.specId) url += '&specializationId=' + S.specId;
         if (S.batchYear) url += '&batchYear=' + S.batchYear;
         const d = await get(url);
         if (d.error) { el.innerHTML = '<div style="color:var(--danger);padding:16px">' + d.error + '</div>'; return; }
@@ -601,6 +635,53 @@ async function loadStudents() {
 function onZipSelect(e) { selectedZip = e.target.files[0]; document.getElementById('zipLabel').textContent = selectedZip ? selectedZip.name : 'Click to select ZIP'; document.getElementById('zipName').textContent = selectedZip ? selectedZip.name : ''; document.getElementById('zipBtn').disabled = !selectedZip; }
 function onPdfSelect(e) { selectedPdf = e.target.files[0]; document.getElementById('pdfLabel').textContent = selectedPdf ? selectedPdf.name : 'Click to select PDF'; document.getElementById('pdfName').textContent = selectedPdf ? selectedPdf.name : ''; document.getElementById('pdfBtn').disabled = !selectedPdf; }
 function onStructSelect(e) { selectedStruct = e.target.files[0]; document.getElementById('structLabel').textContent = selectedStruct ? selectedStruct.name : 'Click to select .xlsx'; document.getElementById('structName').textContent = selectedStruct ? selectedStruct.name : ''; document.getElementById('structBtn').disabled = !selectedStruct; }
+
+var selectedSpecFile = null;
+function onSpecFileSelect(e) {
+    selectedSpecFile = e.target.files[0];
+    document.getElementById('specLabel').textContent = selectedSpecFile ? selectedSpecFile.name : 'Click or drag enrolment .xlsx here';
+    document.getElementById('specBtn').disabled = !selectedSpecFile;
+}
+
+async function uploadSpecialization() {
+    if (!selectedSpecFile) return;
+    var btn = document.getElementById('specBtn'), res = document.getElementById('specResult');
+    btn.innerHTML = '<span class="spin"></span> Processing...'; btn.disabled = true; res.className = 'upload-result';
+    try {
+        var fd = new FormData(); fd.append('file', selectedSpecFile);
+        var r = await fetch(API + '/students/assign-specialization', { method: 'POST', body: fd });
+        var d = await r.json();
+        if (d.error) { res.className = 'upload-result error'; res.innerHTML = d.error; return; }
+        res.className = 'upload-result success';
+        var specLines = Object.entries(d.updated_by_specialization || {}).map(function(e) {
+            return '<br>&nbsp;&nbsp;• ' + e[0] + ': <strong>' + e[1] + '</strong> students';
+        }).join('');
+        res.innerHTML = '<strong>✓ Done!</strong><br>' +
+            'Rows in file: <strong>' + d.total_rows_in_file + '</strong> | ' +
+            'Students updated: <strong>' + d.students_updated + '</strong> | ' +
+            'Not in DB: <strong>' + d.students_not_in_db + '</strong> | ' +
+            'No spec match: <strong>' + d.rows_without_spec_match + '</strong><br>' +
+            'Still without specialization: <strong>' + d.students_still_without_spec + '</strong>' +
+            (specLines ? '<br><em>Updated per specialization:</em>' + specLines : '');
+    } catch (e) { res.className = 'upload-result error'; res.innerHTML = e.message; }
+    btn.innerHTML = '<i class="fas fa-tags"></i> Assign Specializations'; btn.disabled = false;
+}
+
+async function checkSpecStatus() {
+    var res = document.getElementById('specResult');
+    res.className = 'upload-result'; res.innerHTML = 'Checking...'; res.style.display = 'block';
+    try {
+        var d = await get('/students/specialization-status');
+        var lines = (d.per_specialization || []).map(function(s) {
+            return '<br>&nbsp;&nbsp;• ' + (s.name || '?') + ' [' + (s.programme || '?') + ']: <strong>' + s.students + '</strong> students';
+        }).join('');
+        res.className = 'upload-result ' + (d.without_specialization > 0 ? 'error' : 'success');
+        res.innerHTML = '<strong>Status:</strong> ' +
+            d.with_specialization + ' / ' + d.total_students + ' students have a specialization assigned.<br>' +
+            '<strong>' + d.without_specialization + '</strong> still need assignment.' +
+            (lines ? '<br><em>Per specialization:</em>' + lines : '');
+    } catch (e) { res.className = 'upload-result error'; res.innerHTML = e.message; }
+}
 
 function handleDrop(e, id) {
     e.preventDefault(); e.currentTarget.classList.remove('over');
