@@ -224,16 +224,6 @@ public class OBEDashboardController {
             pos.sort(Comparator.comparingInt(po -> { try { return Integer.parseInt(po.getCode().replaceAll("\\D+","")); } catch (Exception e) { return 999; } }));
             List<String> poHeaders = pos.stream().map(PO::getCode).collect(Collectors.toList());
 
-            List<Map<String, Object>> coPoRows = new ArrayList<>();
-            for (CO co : cos) {
-                Map<String, Object> row = new LinkedHashMap<>(); row.put("co", co.getCode());
-                Map<String, Integer> weights = new HashMap<>();
-                if (co.getId() != null) copoRepository.findByCoId(co.getId()).forEach(m -> weights.put(m.getPo().getCode(), m.getWeight()));
-                for (String p : poHeaders) {
-                    row.put(p, weights.getOrDefault(p, 0));
-                }
-                coPoRows.add(row);
-            }
             Map<String, Double> poAttService = attainmentService.calculatePOAttainment(course.getId(), specId);
 
             Map<String, Double> poAttainment = new LinkedHashMap<>();
@@ -246,7 +236,6 @@ public class OBEDashboardController {
             // ── PSO Attainment ───────────────────────────────────────────
             List<String> psoHeaders = new ArrayList<>();
             Map<String, Double> psoAttainment = new LinkedHashMap<>();
-            List<Map<String, Object>> coPsoRows = new ArrayList<>();
             if (prog != null) {
                 List<PSO> psos = new ArrayList<>(psoRepository.findByProgram(prog));
                 psos.removeIf(p -> p.getCode() == null || p.getCode().toUpperCase().contains("CODE"));
@@ -254,13 +243,6 @@ public class OBEDashboardController {
                 psoHeaders = psos.stream().map(PSO::getCode).collect(Collectors.toList());
 
                 if (!psoHeaders.isEmpty()) {
-                    for (CO co : cos) {
-                        Map<String, Object> row = new LinkedHashMap<>(); row.put("co", co.getCode());
-                        Map<String, Integer> psoWeights = new HashMap<>();
-                        if (co.getId() != null) copsoRepository.findByCoId(co.getId()).forEach(m -> psoWeights.put(m.getPso().getCode(), m.getWeight()));
-                        for (String ps : psoHeaders) row.put(ps, psoWeights.getOrDefault(ps, 0));
-                        coPsoRows.add(row);
-                    }
                     Map<String, Double> psoAttService = attainmentService.calculatePSOAttainment(course.getId(), specId);
 
                     for (String ps : psoHeaders) {
@@ -271,13 +253,34 @@ public class OBEDashboardController {
                 }
             }
 
+            // ── Combined CO-PO-PSO Mapping Matrix ────────────────────────
+            List<Map<String, Object>> coMappingMatrix = new ArrayList<>();
+            for (CO co : cos) {
+                Map<String, Object> row = new LinkedHashMap<>(); 
+                row.put("co", co.getCode());
+                Map<String, Integer> poWeights = new HashMap<>();
+                Map<String, Integer> psoWeights = new HashMap<>();
+                if (co.getId() != null) {
+                    copoRepository.findByCoId(co.getId()).forEach(m -> poWeights.put(m.getPo().getCode(), m.getWeight()));
+                    copsoRepository.findByCoId(co.getId()).forEach(m -> psoWeights.put(m.getPso().getCode(), m.getWeight()));
+                }
+                for (String p : poHeaders) {
+                    row.put(p, poWeights.getOrDefault(p, 0));
+                }
+                for (String ps : psoHeaders) {
+                    row.put(ps, psoWeights.getOrDefault(ps, 0));
+                }
+                coMappingMatrix.add(row);
+            }
+
             Map<String, Object> res = new LinkedHashMap<>();
             res.put("id", course.getId()); res.put("courseCode", course.getCourseCode()); res.put("courseName", course.getCourseName());
             res.put("studentCount", byStudent.size()); res.put("avgAttainment", courseAvg);
             res.put("coAttainments", coAttainments); res.put("poHeaders", poHeaders);
-            res.put("coPoMatrix", coPoRows); res.put("poAttainment", poAttainment);
-            res.put("psoHeaders", psoHeaders); res.put("psoAttainment", psoAttainment);
-            res.put("coPsoMatrix", coPsoRows);
+            res.put("psoHeaders", psoHeaders);
+            res.put("coMappingMatrix", coMappingMatrix); 
+            res.put("poAttainment", poAttainment);
+            res.put("psoAttainment", psoAttainment);
             courseResults.add(res);
         }
 
@@ -588,23 +591,6 @@ public class OBEDashboardController {
                     for (String c : coCodes) { row.put(c, fallbackPct); coAtt.put(c, fallbackPct); }
                 }
 
-                Map<String, Double> spa = new LinkedHashMap<>();
-                for (PO po : pos) {
-                    double ws=0, wt=0;
-                    for (CO co : coList) {
-                        int w = coPOW.getOrDefault(co.getCode(), Map.of()).getOrDefault(po.getCode(), 0);
-                        if (w > 0) {
-                            double coPct = coAtt.getOrDefault(co.getCode(), 0.0);
-                            double coLevel = coPct >= 80.0 ? 3.0 : coPct >= 60.0 ? 2.0 : 1.0;
-                            ws += coLevel * w; wt += w;
-                        }
-                    }
-                    spa.put(po.getCode(), wt > 0 ? r1(ws / wt) : 0.0);
-                }
-                row.put("poAttainment", spa);
-                double overall = totalMax > 0 ? Math.min(100.0, r1(totalObt / totalMax * 100.0)) : 0;
-                row.put("overall", overall);
-                row.put("status", overall >= 40 ? "Pass" : "At Risk");
                 students.add(row);
             }
             students.sort(Comparator.comparing(s -> String.valueOf(s.get("enrollmentNo"))));
