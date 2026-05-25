@@ -35,6 +35,7 @@ public class OBEDashboardController {
 
     @GetMapping("/batches")
     public ResponseEntity<?> getBatches(@RequestParam(required = false) Long programId) {
+        // Start from DB batch entities
         Map<Integer, Integer> startToEnd = new TreeMap<>(Comparator.reverseOrder());
         for (Batch b : batchRepository.findAll()) {
             try {
@@ -43,6 +44,27 @@ public class OBEDashboardController {
                 if (sy > 0) startToEnd.merge(sy, ey > 0 ? ey : sy + 3, (a, bv) -> Math.max(a, bv));
             } catch (Exception ignored) {}
         }
+
+        // Also add virtual batches derived from actual enrollment year prefixes in the marks DB.
+        // This ensures the dropdown shows "2024-2028 Batch" even if no 2024 batch entity exists,
+        // so users can filter to see 24xx BCA/MCA students that were uploaded from the 2024-25 files.
+        if (programId != null) {
+            Program prog = programRepository.findById(programId).orElse(null);
+            if (prog != null) {
+                try {
+                    List<String> prefixes = studentRepository.findDistinctEnrollmentYearPrefixesByProgram(prog);
+                    for (String prefix : prefixes) {
+                        if (prefix == null || prefix.isBlank()) continue;
+                        int sy = 2000 + Integer.parseInt(prefix); // "23" → 2023, "24" → 2024
+                        // Determine programme duration (BTech=4yr, BCA=3yr, MCA=2yr, BSc=3yr)
+                        String progName = prog.getName() == null ? "" : prog.getName().toLowerCase();
+                        int dur = progName.contains("mca") ? 2 : (progName.contains("mtech") ? 2 : 4);
+                        startToEnd.merge(sy, sy + dur - 1, (a, bv) -> Math.max(a, bv));
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
         List<Map<String, Object>> batches = new ArrayList<>();
         int i = 1;
         for (Map.Entry<Integer, Integer> e : startToEnd.entrySet()) {
@@ -53,6 +75,7 @@ public class OBEDashboardController {
         }
         return ResponseEntity.ok(batches);
     }
+
 
     @GetMapping("/programs")
     public ResponseEntity<?> getPrograms() {
@@ -86,11 +109,12 @@ public class OBEDashboardController {
                     .filter(b -> b.getSpecialization() != null && specializationId.equals(b.getSpecialization().getId()))
                     .collect(Collectors.toList());
         }
-        if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
-            try { int fy = Integer.parseInt(batchYear);
-                batches = batches.stream().filter(b -> { try { return fy == b.getStartYear(); } catch (Exception e) { return false; } }).collect(Collectors.toList());
-            } catch (NumberFormatException ignored) {}
-        }
+        // NOTE: We do NOT filter semesters by batchYear here.
+        // All programmes use a single shared DB batch entity (e.g. startYear=2023) even
+        // when actual students enrolled in 2024. Filtering by batch.getStartYear() would
+        // wipe out all semesters for BCA/MCA/BSc when batchYear=2024 is selected.
+        // The batchYear only controls which students' marks are shown — not which
+        // courses/semesters are visible in the structural dropdowns.
         Map<Integer, Long> semNumToId = new TreeMap<>();
         for (Batch b : batches) {
             for (Semester s : semesterRepository.findByBatch(b)) {
@@ -292,25 +316,44 @@ public class OBEDashboardController {
             courses = getCoursesForFilter(programId, specializationId, batchYear);
         }
 
+        // NOTE: We do NOT filter courses by batchYear here.
+        // All BCA/MCA/BSc courses belong to a single 2023 DB batch entity.
+        // Filtering by c.getBatch().getStartYear() would eliminate all courses
+        // when batchYear=2024 is selected. The batchYear only filters student marks.
+        courses = deduplicateCourses(courses);
+        // Pre-fetch programme entity once for null-spec fallback
+        final Long specId = specializationId;
+        final org.example.entity.Program progEntity = (programId != null)
+                ? programRepository.findById(programId).orElse(null) : null;
+        // Compute year prefix for batch-aware null-spec count
+        String courseListYearPrefix = null;
         if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
-            try { int fy = Integer.parseInt(batchYear);
-                courses = courses.stream().filter(c -> c.getBatch() != null && fy == c.getBatch().getStartYear()).collect(Collectors.toList());
+            try {
+                int fy = Integer.parseInt(batchYear);
+                courseListYearPrefix = String.format("%02d", fy % 100);
             } catch (NumberFormatException ignored) {}
         }
-        courses = deduplicateCourses(courses);
-        // Capture specId for lambda
-        final Long specId = specializationId;
+        final String finalCourseListYearPrefix = courseListYearPrefix;
+        // Only use null-spec fallback when programme has exactly 1 spec.
+        // Multi-spec programmes (BSc, BTech) can't reliably attribute null-spec students
+        // to any one spec, so the fallback would bleed students across specs.
+        final boolean allowNullSpecCountFallback = (progEntity != null)
+                && specializationRepository.findByProgram(progEntity).size() == 1;
+
         return ResponseEntity.ok(courses.stream()
                 .map(c -> {
-                    // Use a COUNT query — far faster than loading all mark rows.
-                    // When a specialization filter is active, count only students
-                    // from batches belonging to that specialization so that a common
-                    // course (e.g. ENMA101 taken by all BTech students) shows the
-                    // correct ~50 Cyber-Security students rather than all 1123.
                     long studentCount;
                     try {
                         if (specId != null) {
                             studentCount = studentMarkRepository.countDistinctStudentsByCourseAndSpecialization(c, specId);
+                            // Fallback: count null-spec students of the same programme + batch year.
+                            // Only for single-spec programmes (MCA, BCA) where null-spec students
+                            // unambiguously belong to the one available specialization.
+                            if (studentCount == 0 && allowNullSpecCountFallback) {
+                                studentCount = studentMarkRepository
+                                        .countDistinctStudentsByCourseAndNullSpecAndProgram(
+                                                c, progEntity, finalCourseListYearPrefix);
+                            }
                         } else {
                             studentCount = studentMarkRepository.countDistinctStudentsByCourse(c);
                         }
@@ -372,32 +415,62 @@ public class OBEDashboardController {
             //    When a specialization is selected but returns 0 students, we return empty —
             //    this is correct and will resolve itself once enrollment data is uploaded.
             List<StudentMark> marks;
+            // Compute year prefix once — used both in null-spec fallback and batch filter.
+            // batchYear is the full 4-digit year (e.g. "2023"); yearPrefix is the 2-digit
+            // enrollment prefix (e.g. "23") that identifies students from that batch.
+            String yearPrefix = null;
+            if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
+                try {
+                    int fy = Integer.parseInt(batchYear);
+                    yearPrefix = String.format("%02d", fy % 100); // 2023 → "23", 2024 → "24"
+                } catch (NumberFormatException ignored) {}
+            }
+            final String finalYearPrefix = yearPrefix;
+
+            boolean usedNullSpecFallback = false;
             if (specializationId != null) {
                 marks = new ArrayList<>(studentMarkRepository.findByCourseAndSpecId(finalCourse, specializationId));
-                // No fallback to all-marks: showing wrong students is worse than showing 0.
+                // Fallback: if the strict spec filter returns 0, include null-spec students
+                // from the same programme and batch year (MCA, BCA, BSc without enrollment Excel).
+                // Pass finalYearPrefix so the DB pre-filters to the correct enrollment year.
+                if (marks.isEmpty()) {
+                    org.example.entity.Program fallbackProg = null;
+                    if (finalCourse.getProgram() != null) {
+                        fallbackProg = finalCourse.getProgram();
+                    } else {
+                        org.example.entity.Specialization sp = specializationRepository.findById(specializationId).orElse(null);
+                        if (sp != null) fallbackProg = sp.getProgram();
+                    }
+                    // Only use null-spec fallback for single-spec programmes (MCA, BCA).
+                    // Multi-spec programmes (BSc, BTech) have multiple specs per programme;
+                    // null-spec students cannot be attributed to any one spec, so using them
+                    // would bleed Data Science students into Cyber Security views etc.
+                    boolean singleSpec = (fallbackProg != null)
+                            && specializationRepository.findByProgram(fallbackProg).size() == 1;
+                    if (fallbackProg != null && singleSpec) {
+                        marks = new ArrayList<>(studentMarkRepository
+                                .findByCourseAndProgramWithNullSpec(finalCourse, fallbackProg, finalYearPrefix));
+                        usedNullSpecFallback = !marks.isEmpty();
+                    }
+                }
             } else {
                 marks = new ArrayList<>(studentMarkRepository.findByCourseWithStudent(finalCourse));
             }
 
-            // 4. Filter by batchYear.
-            // For null-batch students, validate via enrollment number year prefix (digits 1-2)
-            // rather than blindly including them — prevents cross-year students from leaking in.
-            if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
-                try {
-                    int fy = Integer.parseInt(batchYear);
-                    String yearPrefix = String.format("%02d", fy % 100); // 2023 → "23"
-                    List<StudentMark> byBatch = marks.stream().filter(sm -> {
-                        if (sm.getStudent() == null) return false;
-                        if (sm.getStudent().getBatch() == null) {
-                            // No batch set: match via enrollment number year prefix
-                            String enr = sm.getStudent().getEnrollmentNumber();
-                            return enr != null && enr.length() >= 2 && enr.startsWith(yearPrefix);
-                        }
-                        try { return fy == sm.getStudent().getBatch().getStartYear(); }
-                        catch (Exception e) { return false; }
-                    }).collect(Collectors.toList());
-                    if (!byBatch.isEmpty()) marks = byBatch;
-                } catch (NumberFormatException ignored) {}
+            // 4. Filter by batchYear using enrollment number prefix (first 2 digits).
+            // Enrollment prefix is the single authoritative year signal for ALL students.
+            // The batch entity startYear is NOT reliable because all programmes share one
+            // batch entity (id=1, year=2023) even when marks contain 23xx AND 24xx students.
+            // The null-spec fallback already pre-filtered by yearPrefix in the DB query above,
+            // so this pass-through catches any spec-assigned students that slipped through.
+            if (finalYearPrefix != null) {
+                marks = marks.stream().filter(sm -> {
+                    if (sm.getStudent() == null) return false;
+                    String enr = sm.getStudent().getEnrollmentNumber();
+                    // KR-prefix is a special enrollment format — always include
+                    if (enr != null && enr.startsWith("KR")) return true;
+                    return enr != null && enr.length() >= 2 && enr.startsWith(finalYearPrefix);
+                }).collect(Collectors.toList());
             }
 
             // 5. Prepare CO list (sorted) — use finalCourse (the entity that has marks + COs)

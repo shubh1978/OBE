@@ -43,9 +43,11 @@ public class EnrollmentCodeUtil {
         CODE_TO_SPEC_NAME.put("42", "UX/UI");
         CODE_TO_SPEC_NAME.put("20", null);   // plain BCA
         CODE_TO_SPEC_NAME.put("21", "Artificial Intelligence and Data Science");
-        CODE_TO_SPEC_NAME.put("73", null);   // plain BSc CS
-        CODE_TO_SPEC_NAME.put("83", "Cyber Security");
-        CODE_TO_SPEC_NAME.put("84", "Data Science");
+        CODE_TO_SPEC_NAME.put("72", "Computer Science with IBM Collaboration"); // BSc CS (IBM)
+        CODE_TO_SPEC_NAME.put("73", null);   // plain BSc CS (legacy)
+        CODE_TO_SPEC_NAME.put("83", "Cyber Security");   // BSc Cyber Security
+        CODE_TO_SPEC_NAME.put("84", "Data Science");     // BSc Data Science
+
     }
 
     @Autowired

@@ -455,4 +455,103 @@ public class StudentSpecializationController {
             default -> "";
         };
     }
+
+    /**
+     * POST /students/assign-spec-from-enrollment-code
+     *
+     * Retroactively assigns specializations to all null-spec students based on
+     * the 2-digit code at positions 4-5 of their enrollment number.
+     *
+     * E.g. enrollment 2401840001 → code "84" → BSc "Data Science"
+     *      enrollment 2401830001 → code "83" → BSc "Cyber Security"
+     *      enrollment 2401720001 → code "72" → BSc "Computer Science with IBM Collaboration"
+     *
+     * Safe to call repeatedly (idempotent). Only updates students where spec is null.
+     * Students whose spec is already set are left unchanged.
+     */
+    @PostMapping("/assign-spec-from-enrollment-code")
+    @Transactional
+    public ResponseEntity<?> assignSpecFromEnrollmentCode() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        Map<String, String> codeToSpec = enrollmentCodeUtil.getCodeToSpecNameMap();
+
+        // Build a cache of specName → Specialization entities for all programmes
+        Map<String, Specialization> specByName = new LinkedHashMap<>();
+        for (Specialization sp : specializationRepository.findAll()) {
+            if (sp.getName() != null) {
+                specByName.put(sp.getName().toLowerCase().trim(), sp);
+            }
+        }
+
+        int total = 0, updated = 0, skipped = 0, noCodeMatch = 0;
+        Map<String, Integer> bySpec = new LinkedHashMap<>();
+
+        List<Student> nullSpecStudents = studentRepository.findBySpecializationIsNull();
+        total = nullSpecStudents.size();
+
+
+        for (Student student : nullSpecStudents) {
+            String enr = student.getEnrollmentNumber();
+            if (enr == null || enr.length() < 6) { skipped++; continue; }
+
+            String code = enr.substring(4, 6);
+            String specName = codeToSpec.getOrDefault(code, "NOT_FOUND");
+
+            if ("NOT_FOUND".equals(specName) || specName == null) {
+                // Code not in map OR code is mapped to null (plain programme)
+                noCodeMatch++;
+                continue;
+            }
+
+            // Find matching specialization — try by name in student's programme first
+            Specialization spec = null;
+            if (student.getProgram() != null) {
+                spec = specializationRepository.findByProgram(student.getProgram()).stream()
+                        .filter(s -> s.getName() != null &&
+                                s.getName().toLowerCase().contains(specName.toLowerCase()))
+                        .findFirst().orElse(null);
+            }
+            // Fallback: global name search
+            if (spec == null) {
+                spec = specByName.get(specName.toLowerCase().trim());
+            }
+
+            if (spec == null) { skipped++; continue; }
+
+            student.setSpecialization(spec);
+            studentRepository.save(student);
+            updated++;
+            bySpec.merge(spec.getName(), 1, Integer::sum);
+        }
+
+        result.put("status", "success");
+        result.put("total_null_spec_students", total);
+        result.put("updated", updated);
+        result.put("skipped_no_code_match", noCodeMatch);
+        result.put("skipped_other", skipped);
+        result.put("by_specialization", bySpec);
+
+        // ── Second pass: single-spec programmes ──────────────────────────────────
+        // For programmes that have exactly 1 specialization (MCA "Cse", BCA "AI & Data Science"),
+        // any remaining null-spec student unambiguously belongs to that one spec.
+        // This covers MCA code "56" and plain BCA code "20" which map to null in CODE_TO_SPEC_NAME.
+        int singleSpecUpdated = 0;
+        for (Program prog : programRepository.findAll()) {
+            List<Specialization> progSpecs = specializationRepository.findByProgram(prog);
+            if (progSpecs.size() != 1) continue; // skip multi-spec programmes
+            Specialization onlySpec = progSpecs.get(0);
+
+            List<Student> remaining = studentRepository.findByProgramAndSpecializationIsNull(prog);
+            for (Student s : remaining) {
+                s.setSpecialization(onlySpec);
+                studentRepository.save(s);
+                singleSpecUpdated++;
+                bySpec.merge(onlySpec.getName(), 1, Integer::sum);
+            }
+        }
+        result.put("single_spec_programme_updated", singleSpecUpdated);
+        result.put("by_specialization", bySpec); // refresh with updated counts
+        return ResponseEntity.ok(result);
+    }
 }
+

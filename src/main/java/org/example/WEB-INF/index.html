@@ -255,6 +255,9 @@ tr:hover td{background:var(--bg)}
             <button class="btn-primary" id="specBtn" onclick="uploadSpecialization()" disabled style="background:var(--warn)">
               <i class="fas fa-tags"></i> Assign Specializations
             </button>
+            <button class="btn-primary" onclick="autoFixSpecFromCode()" style="background:var(--success);font-size:11px;padding:6px 12px" title="Assigns specialization to null-spec students using the 2-digit code in their enrollment number (e.g. 83=BSc CySec, 84=BSc DS, 72=BSc IBM CS, plus all single-spec programmes like MCA/BCA)">
+              <i class="fas fa-magic"></i> Auto-Fix from Enrollment Code
+            </button>
             <button class="btn-primary" onclick="checkSpecStatus()" style="background:var(--text-2);font-size:11px;padding:6px 12px">
               <i class="fas fa-info-circle"></i> Check Status
             </button>

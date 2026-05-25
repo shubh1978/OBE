@@ -141,4 +141,40 @@ public interface StudentMarkRepository extends JpaRepository<StudentMark, Long> 
     long countDistinctStudentsByCourseAndSpecialization(
             @Param("course") Course course,
             @Param("specializationId") Long specializationId);
+
+    /**
+     * Fallback query: fetch marks for a course where the student has NULL specialization
+     * but belongs to the correct programme AND the given batch year prefix.
+     * yearPrefix is the 2-digit year (e.g. "23" for 2023 batch, "24" for 2024).
+     * Filters via SUBSTRING(enrollmentNumber, 1, 2) so 2024 students never
+     * appear when a 2023 batch is selected.
+     */
+    @Query("SELECT sm FROM StudentMark sm " +
+           "JOIN FETCH sm.student st " +
+           "LEFT JOIN FETCH st.batch b " +
+           "LEFT JOIN FETCH b.specialization " +
+           "WHERE sm.course = :course " +
+           "AND st.specialization IS NULL " +
+           "AND st.program = :program " +
+           "AND (:yearPrefix IS NULL OR SUBSTRING(st.enrollmentNumber, 1, 2) = :yearPrefix)")
+    List<StudentMark> findByCourseAndProgramWithNullSpec(
+            @Param("course") Course course,
+            @Param("program") org.example.entity.Program program,
+            @Param("yearPrefix") String yearPrefix);
+
+    /**
+     * Count distinct null-spec students for a course scoped to a programme and batch year.
+     * yearPrefix is the 2-digit enrollment year (e.g. "23", "24").
+     * Pass null to count across all years.
+     */
+    @Query("SELECT COUNT(DISTINCT sm.student.id) FROM StudentMark sm " +
+           "JOIN sm.student st " +
+           "WHERE sm.course = :course " +
+           "AND st.specialization IS NULL " +
+           "AND st.program = :program " +
+           "AND (:yearPrefix IS NULL OR SUBSTRING(st.enrollmentNumber, 1, 2) = :yearPrefix)")
+    long countDistinctStudentsByCourseAndNullSpecAndProgram(
+            @Param("course") Course course,
+            @Param("program") org.example.entity.Program program,
+            @Param("yearPrefix") String yearPrefix);
 }

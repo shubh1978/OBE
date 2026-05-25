@@ -76,6 +76,11 @@ async function onProgChange() {
         const b = document.getElementById('sel_batch');
         batches.forEach(function(x) { b.add(new Option(x.label, x.year)); });
         b.disabled = batches.length === 0;
+        // Auto-select the most recent batch (first in list, server returns newest first)
+        if (batches.length > 0) {
+            b.value = batches[0].year;
+            S.batchYear = batches[0].year;
+        }
     } catch (e) { console.warn('batches', e); }
     try {
         const specs = await get('/dashboard/specializations?programId=' + S.programId);
@@ -680,6 +685,26 @@ async function checkSpecStatus() {
             d.with_specialization + ' / ' + d.total_students + ' students have a specialization assigned.<br>' +
             '<strong>' + d.without_specialization + '</strong> still need assignment.' +
             (lines ? '<br><em>Per specialization:</em>' + lines : '');
+    } catch (e) { res.className = 'upload-result error'; res.innerHTML = e.message; }
+}
+
+async function autoFixSpecFromCode() {
+    var res = document.getElementById('specResult');
+    res.className = 'upload-result'; res.innerHTML = '<span class="spin"></span> Auto-assigning specializations from enrollment codes...'; res.style.display = 'block';
+    try {
+        var r = await fetch(API + '/students/assign-spec-from-enrollment-code', { method: 'POST' });
+        var d = await r.json();
+        if (d.error) { res.className = 'upload-result error'; res.innerHTML = d.error; return; }
+        var specLines = Object.entries(d.by_specialization || {}).map(function(e) {
+            return '<br>&nbsp;&nbsp;• ' + e[0] + ': <strong>' + e[1] + '</strong> students';
+        }).join('');
+        res.className = 'upload-result success';
+        res.innerHTML = '<strong>✓ Done!</strong><br>' +
+            'Total null-spec: <strong>' + d.total_null_spec_students + '</strong> | ' +
+            'Fixed by enrollment code: <strong>' + d.updated + '</strong> | ' +
+            'Fixed (single-spec prog): <strong>' + (d.single_spec_programme_updated || 0) + '</strong> | ' +
+            'No match (plain prog): <strong>' + d.skipped_no_code_match + '</strong>' +
+            (specLines ? '<br><em>By specialization:</em>' + specLines : '');
     } catch (e) { res.className = 'upload-result error'; res.innerHTML = e.message; }
 }
 
