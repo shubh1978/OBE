@@ -147,7 +147,7 @@ public class OBEDashboardController {
         }
         if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
             try { int fy = Integer.parseInt(batchYear);
-                courses = courses.stream().filter(c -> { if (c.getBatch()==null) return false; try { return fy==c.getBatch().getStartYear(); } catch (Exception e) { return false; } }).collect(Collectors.toList());
+                courses = courses.stream().filter(c -> { if (c.getBatch()==null) return true; try { return fy==c.getBatch().getStartYear(); } catch (Exception e) { return false; } }).collect(Collectors.toList());
             } catch (NumberFormatException ignored) {}
         }
         if (courseCode != null && !courseCode.isBlank())
@@ -160,16 +160,22 @@ public class OBEDashboardController {
         Map<String, List<Double>> branchPoAtt = new LinkedHashMap<>(), branchPsoAtt = new LinkedHashMap<>();
 
         for (Course course : courses) {
-            // Load marks scoped to the selected specialization when one is set.
-            // This ensures student count, at-risk count, and CO/PO/PSO attainment
-            // all reflect only the students from the selected specialization.
             final Long specId = specializationId;
-            List<StudentMark> marks = (specId != null)
-                    ? studentMarkRepository.findByCourseIdAndSpecId(course.getId(), specId)
-                    : studentMarkRepository.findByCourse(course);
-
-            // If the spec-filtered list is empty (students not yet assigned), fall back to ALL
-            if (marks.isEmpty() && specId != null) {
+            List<StudentMark> marks;
+            if (specId != null) {
+                marks = studentMarkRepository.findByCourseIdAndSpecId(course.getId(), specId);
+                // Fallback: use enrollment spec codes when specialization_id is not set on students
+                if (marks.isEmpty()) {
+                    List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specId);
+                    if (!specCodes.isEmpty()) {
+                        marks = studentMarkRepository.findByCourseIdAndEnrollmentSpecCodes(course.getId(), specCodes);
+                    }
+                }
+                // Last resort: fall back to ALL marks for the course
+                if (marks.isEmpty()) {
+                    marks = studentMarkRepository.findByCourse(course);
+                }
+            } else {
                 marks = studentMarkRepository.findByCourse(course);
             }
 
@@ -349,6 +355,13 @@ public class OBEDashboardController {
                     try {
                         if (specId != null) {
                             studentCount = studentMarkRepository.countDistinctStudentsByCourseAndSpecialization(c, specId);
+                            // Fallback: use enrollment spec codes when specialization_id is not assigned
+                            if (studentCount == 0) {
+                                List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specId);
+                                if (!specCodes.isEmpty()) {
+                                    studentCount = studentMarkRepository.countDistinctStudentsByCourseAndSpecCodes(c, specCodes);
+                                }
+                            }
                             // Fallback: count null-spec students of the same programme + batch year.
                             // Only for single-spec programmes (MCA, BCA) where null-spec students
                             // unambiguously belong to the one available specialization.
@@ -433,7 +446,14 @@ public class OBEDashboardController {
             boolean usedNullSpecFallback = false;
             if (specializationId != null) {
                 marks = new ArrayList<>(studentMarkRepository.findByCourseAndSpecId(finalCourse, specializationId));
-                // Fallback: if the strict spec filter returns 0, include null-spec students
+                // Fallback #1: use enrollment spec codes when specialization_id is not assigned
+                if (marks.isEmpty()) {
+                    List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specializationId);
+                    if (!specCodes.isEmpty()) {
+                        marks = new ArrayList<>(studentMarkRepository.findByCourseAndEnrollmentSpecCodes(finalCourse, specCodes));
+                    }
+                }
+                // Fallback #2: if the strict spec filter returns 0, include null-spec students
                 // from the same programme and batch year (MCA, BCA, BSc without enrollment Excel).
                 // Pass finalYearPrefix so the DB pre-filters to the correct enrollment year.
                 if (marks.isEmpty()) {
@@ -461,11 +481,8 @@ public class OBEDashboardController {
             }
 
             // 4. Filter by batchYear using enrollment number prefix (first 2 digits).
-            // Enrollment prefix is the single authoritative year signal for ALL students.
-            // The batch entity startYear is NOT reliable because all programmes share one
-            // batch entity (id=1, year=2023) even when marks contain 23xx AND 24xx students.
-            // The null-spec fallback already pre-filtered by yearPrefix in the DB query above,
-            // so this pass-through catches any spec-assigned students that slipped through.
+            // E.g. batchYear="2023" → yearPrefix="23" → only keep students whose
+            // enrollment number starts with "23". Students with "24xx" are a different batch.
             if (finalYearPrefix != null) {
                 marks = marks.stream().filter(sm -> {
                     if (sm.getStudent() == null) return false;

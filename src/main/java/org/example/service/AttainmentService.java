@@ -33,6 +33,29 @@ public class AttainmentService {
     // Use enrollmentCodeUtil.getEnrollmentCodesForSpecId() instead (single source of truth).
 
     /**
+     * Load marks for a course scoped to a specialization, with enrollment-code fallback.
+     * First tries student.specialization_id (the gold-standard field set by the Assign
+     * Specialization workflow). If that returns 0 marks, falls back to filtering by
+     * the 2-digit enrollment spec code (digits 4-5 of enrollment number), which
+     * identifies the specialization even before students have been assigned.
+     */
+    private List<StudentMark> loadMarksForSpec(Long courseId, Long specializationId) {
+        if (specializationId == null) {
+            return studentMarkRepository.findByCourseId(courseId);
+        }
+        // Primary: student.specialization_id
+        List<StudentMark> marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
+        if (!marks.isEmpty()) return marks;
+
+        // Fallback: enrollment spec codes (e.g. "19" for BTech Data Science)
+        List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specializationId);
+        if (!specCodes.isEmpty()) {
+            marks = studentMarkRepository.findByCourseIdAndEnrollmentSpecCodes(courseId, specCodes);
+        }
+        return marks;
+    }
+
+    /**
      * Calculate overall CO attainment for a course (combines mid-term and end-term).
      *
      * Special rule for end-term: Questions 2, 3, 4, 5 have (a) and (b) options.
@@ -57,12 +80,7 @@ public class AttainmentService {
      * specialization_id are included — giving per-specialization attainment.
      */
     public Map<String, Double> calculateCOAttainment(Long courseId, Long specializationId) {
-        List<StudentMark> marks;
-        if (specializationId != null) {
-            marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
-        } else {
-            marks = studentMarkRepository.findByCourseId(courseId);
-        }
+        List<StudentMark> marks = loadMarksForSpec(courseId, specializationId);
         List<QuestionCOMapping> mappings = questionCOMappingRepository.findByCourseId(courseId);
 
         if (marks.isEmpty() || mappings.isEmpty()) {
@@ -289,7 +307,7 @@ public class AttainmentService {
 
     /** Distinct student count for a course scoped to a specialization. */
     public int getStudentCountBySpec(Long courseId, Long specializationId) {
-        List<StudentMark> marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
+        List<StudentMark> marks = loadMarksForSpec(courseId, specializationId);
         return (int) marks.stream().map(m -> m.getStudent().getId()).distinct().count();
     }
 
@@ -298,12 +316,7 @@ public class AttainmentService {
      * optionally scoped to a specialization.
      */
     public int getAtRiskCount(Long courseId, Long specializationId) {
-        List<StudentMark> marks;
-        if (specializationId != null) {
-            marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
-        } else {
-            marks = studentMarkRepository.findByCourseId(courseId);
-        }
+        List<StudentMark> marks = loadMarksForSpec(courseId, specializationId);
         Map<Long, List<StudentMark>> byStudent = new java.util.HashMap<>();
         for (StudentMark sm : marks) {
             byStudent.computeIfAbsent(sm.getStudent().getId(), k -> new ArrayList<>()).add(sm);

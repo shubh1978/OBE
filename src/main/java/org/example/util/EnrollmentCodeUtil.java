@@ -30,23 +30,36 @@ public class EnrollmentCodeUtil {
      * This is the ONLY place this mapping lives in the application.
      */
     private static final Map<String, String> CODE_TO_SPEC_NAME = new LinkedHashMap<>();
+    /**
+     * Maps the 2-digit enrollment spec-code to the programme name it belongs to.
+     * Used to prevent cross-programme contamination (e.g. BTech CSE code "01"
+     * vs MCA Cse code "56" both have spec name containing "cse").
+     */
+    private static final Map<String, String> CODE_TO_PROGRAM = new LinkedHashMap<>();
     static {
-        CODE_TO_SPEC_NAME.put("01", null);   // plain BTech CSE
-        CODE_TO_SPEC_NAME.put("10", "Artificial Intelligence and Machine Learning");
-        CODE_TO_SPEC_NAME.put("11", "Artificial Intelligence and Machine Learning");
-        CODE_TO_SPEC_NAME.put("12", "Artificial Intelligence and Machine Learning");
-        CODE_TO_SPEC_NAME.put("17", "Full Stack Development");
-        CODE_TO_SPEC_NAME.put("18", "Full Stack Development");
-        CODE_TO_SPEC_NAME.put("19", "Data Science");
-        CODE_TO_SPEC_NAME.put("40", "Cyber Security");
-        CODE_TO_SPEC_NAME.put("41", "Cyber Security");
-        CODE_TO_SPEC_NAME.put("42", "UX/UI");
-        CODE_TO_SPEC_NAME.put("20", null);   // plain BCA
-        CODE_TO_SPEC_NAME.put("21", "Artificial Intelligence and Data Science");
+        // ── BTech codes ──────────────────────────────────────────────────────
+        CODE_TO_SPEC_NAME.put("01", "CSE");                    // BTech CSE
+        CODE_TO_SPEC_NAME.put("35", "Full Stack Development"); // BTech FSD
+        CODE_TO_SPEC_NAME.put("36", "UX/UI");                  // BTech UI/UX
+        CODE_TO_SPEC_NAME.put("41", "Cyber Security");         // BTech Cyber Security
+        CODE_TO_SPEC_NAME.put("42", "Data Science");           // BTech Data Science
+        CODE_TO_SPEC_NAME.put("73", "Artificial Intelligence and Machine Learning"); // BTech AI & ML
+        for (String c : List.of("01","35","36","41","42","73")) CODE_TO_PROGRAM.put(c, "BTech");
+
+        // ── BCA codes ────────────────────────────────────────────────────────
+        CODE_TO_SPEC_NAME.put("20", "Artificial Intelligence and Data Science"); // BCA AI & DS
+        CODE_TO_SPEC_NAME.put("21", "Artificial Intelligence and Data Science"); // BCA AI & DS (alt)
+        for (String c : List.of("20","21")) CODE_TO_PROGRAM.put(c, "BCA");
+
+        // ── BSc codes ────────────────────────────────────────────────────────
         CODE_TO_SPEC_NAME.put("72", "Computer Science with IBM Collaboration"); // BSc CS (IBM)
-        CODE_TO_SPEC_NAME.put("73", null);   // plain BSc CS (legacy)
-        CODE_TO_SPEC_NAME.put("83", "Cyber Security");   // BSc Cyber Security
-        CODE_TO_SPEC_NAME.put("84", "Data Science");     // BSc Data Science
+        CODE_TO_SPEC_NAME.put("83", "Cyber Security");         // BSc Cyber Security
+        CODE_TO_SPEC_NAME.put("84", "Data Science");           // BSc Data Science
+        for (String c : List.of("72","83","84")) CODE_TO_PROGRAM.put(c, "BSc");
+
+        // ── MCA codes ────────────────────────────────────────────────────────
+        CODE_TO_SPEC_NAME.put("56", "Cse");                    // MCA CSE
+        CODE_TO_PROGRAM.put("56", "MCA");
 
     }
 
@@ -60,21 +73,46 @@ public class EnrollmentCodeUtil {
 
     /**
      * Given a specialization entity ID, return the 2-digit enrollment codes
-     * that correspond to it, derived by matching the specialization's name
-     * against the CODE_TO_SPEC_NAME map.
-     *
-     * Returns an empty list for plain programs (no named sub-specialization)
-     * or unknown specializations.
-     *
-     * Example: specId for "Data Science" → ["19", "84"]
-     *          specId for "Full Stack Development" → ["17", "18"]
-     *          specId for plain CSE → []
+     * that correspond to it — PROGRAMME-AWARE to prevent cross-programme contamination.
+     * E.g. MCA "Cse" (specId=7) returns ["56"] only, NOT ["01","56"].
      */
     public List<String> getEnrollmentCodesForSpecId(Long specId) {
         if (specId == null) return List.of();
         Specialization spec = specializationRepository.findById(specId).orElse(null);
         if (spec == null || spec.getName() == null) return List.of();
-        return getEnrollmentCodesForSpecName(spec.getName());
+        String specName = spec.getName();
+        String progName = (spec.getProgram() != null) ? spec.getProgram().getName() : null;
+        return getEnrollmentCodesForSpecNameAndProgram(specName, progName);
+    }
+
+    /**
+     * Programme-aware enrollment code lookup. Matches by spec name AND programme name
+     * to prevent codes like "01" (BTech CSE) contaminating MCA "Cse" lookups.
+     */
+    private List<String> getEnrollmentCodesForSpecNameAndProgram(String specName, String progName) {
+        if (specName == null || specName.isBlank()) return List.of();
+        String nameLower = specName.trim().toLowerCase();
+        String progLower = (progName != null) ? progName.trim().toLowerCase() : null;
+
+        // Collect codes whose canonical name matches AND belong to the same programme
+        List<String> result = new ArrayList<>();
+        for (Map.Entry<String, String> e : CODE_TO_SPEC_NAME.entrySet()) {
+            String mappedName = e.getValue();
+            if (mappedName == null) continue;
+            String mappedLower = mappedName.toLowerCase();
+            if (nameLower.contains(mappedLower) || mappedLower.contains(nameLower)) {
+                // Programme filter: if we know the programme, only include codes for that programme
+                if (progLower != null) {
+                    String codeProg = CODE_TO_PROGRAM.get(e.getKey());
+                    if (codeProg != null && !codeProg.toLowerCase().equals(progLower)) continue;
+                }
+                if (!result.contains(e.getKey())) result.add(e.getKey());
+            }
+        }
+        if (!result.isEmpty()) return Collections.unmodifiableList(result);
+
+        // Stage 2: keyword-pattern fallback (unchanged)
+        return getEnrollmentCodesForSpecName(specName);
     }
 
     /**
@@ -112,16 +150,16 @@ public class EnrollmentCodeUtil {
             return true;
         };
 
-        // "AI & ML" / "AI and ML" / "Artificial Intelligence..." → codes 10,11,12
+        // "AI & ML" / "AI and ML" / "Artificial Intelligence..." → code 73
         if ((nameLower.contains("ai") && nameLower.contains("ml"))
                 || allContained.apply(nameLower, new String[]{"artificial", "machine"})) {
             return codesForCanonicalName("Artificial Intelligence and Machine Learning");
         }
-        // "Full Stack" / "FSD" → codes 17,18
+        // "Full Stack" / "FSD" → code 35
         if (nameLower.contains("full") && nameLower.contains("stack")) {
             return codesForCanonicalName("Full Stack Development");
         }
-        // "Cyber" / "Cyber Security" → codes 40,41,83
+        // "Cyber" / "Cyber Security" → codes 41,83
         if (nameLower.contains("cyber")) {
             return codesForCanonicalName("Cyber Security");
         }
@@ -135,7 +173,7 @@ public class EnrollmentCodeUtil {
                 && nameLower.contains("data")) {
             return codesForCanonicalName("Artificial Intelligence and Data Science");
         }
-        // "Data Science" / "DS" → codes 19,84
+        // "Data Science" / "DS" → codes 42,84
         if (nameLower.contains("data") && (nameLower.contains("science") || nameLower.contains("sc"))) {
             return codesForCanonicalName("Data Science");
         }

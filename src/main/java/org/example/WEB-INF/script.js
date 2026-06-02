@@ -284,8 +284,9 @@ async function loadDashboard() {
         };
         S.data = d;
         renderDashboard(d);
-        // Course filter dropdown: show courses with marks (for student tab)
-        fillCourseDropdowns(d.courses || []);
+        // Course filter dropdown: show courses with marks (for dashboard filter)
+        // Student tab dropdown: use allCourses so BCS/MSC/MTech/BCA courses show up too
+        fillCourseDropdowns(d.courses || [], d.allCourses || []);
         // Mapping tab: always use allCourses so CO-PO data shows even without marks
         if (currentTab === 'mapping') renderMapping(d.allCourses || []);
     } catch (e) { console.error('loadDashboard', e); }
@@ -521,19 +522,6 @@ async function tog(i) {
 }
 
 // ═══ RENDER MAPPING ═══════════════════════════════════════════
-function buildPsoRows(matrix, psos) {
-    if (!matrix || !matrix.length) {
-        return '<tr><td colspan="' + (psos.length + 1) + '" style="text-align:center;color:var(--text-3);padding:16px">No CO-PSO data.</td></tr>';
-    }
-    return matrix.map(function(r) {
-        const cells = psos.map(function(ps) {
-            const w = r[ps] || 0;
-            return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>';
-        }).join('');
-        return '<tr><td><strong>' + r.co + '</strong></td>' + cells + '</tr>';
-    }).join('');
-}
-
 function renderMapping(courses) {
     const el = document.getElementById('mapping-content');
     if (!courses.length) { el.innerHTML = '<div style="text-align:center;padding:48px;color:var(--text-3)">No mapping data available.</div>'; return; }
@@ -545,46 +533,58 @@ function renderMapping(courses) {
         const psoMatrix = c.coPsoMatrix || [];
         const psoAtt = c.psoAttainment || {};
 
-        const phdr = pos.map(function(p) { return '<th>' + p + '</th>'; }).join('');
-        const rows = matrix.map(function(r) {
-            return '<tr><td><strong>' + r.co + '</strong></td>' +
-                pos.map(function(p) { const w = r[p] || 0; return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>'; }).join('') +
-                '</tr>';
-        }).join('');
-        const prow = pos.map(function(p) {
-            const v = poAtt[p] != null ? poAtt[p] : 0;
-            const pct = v / 3 * 100;
-            return '<td><strong style="color:' + clr(pct) + '">' + v + '</strong></td>';
+        // Build a lookup for PSO weights by CO code from the separate psoMatrix
+        var psoByCoCode = {};
+        (psoMatrix || []).forEach(function(r) { if (r.co) psoByCoCode[r.co] = r; });
+
+        // Determine the list of COs to display — union of coPoMatrix and coPsoMatrix COs
+        var coKeys = [];
+        var coKeySet = {};
+        matrix.forEach(function(r) { if (r.co && !coKeySet[r.co]) { coKeys.push(r.co); coKeySet[r.co] = true; } });
+        (psoMatrix || []).forEach(function(r) { if (r.co && !coKeySet[r.co]) { coKeys.push(r.co); coKeySet[r.co] = true; } });
+
+        // Build a lookup for PO weights by CO code
+        var poByCoCode = {};
+        matrix.forEach(function(r) { if (r.co) poByCoCode[r.co] = r; });
+
+        // Combined header: CO | PO1 PO2 ... | PSO1 PSO2 ...
+        var hasPo = pos.length > 0, hasPso = psos.length > 0;
+        var phdr = pos.map(function(p) { return '<th style="background:#eff6ff;color:#3b5bdb">' + p + '</th>'; }).join('');
+        var psoHdr = psos.map(function(p) { return '<th style="background:#f5f3ff;color:#7c3aed">' + p + '</th>'; }).join('');
+
+        // Combined rows: each CO gets one row with PO weights + PSO weights
+        var rows = coKeys.map(function(coCode) {
+            var poRow = poByCoCode[coCode] || {};
+            var psoRow = psoByCoCode[coCode] || {};
+            var poCells = pos.map(function(p) { var w = poRow[p] || 0; return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>'; }).join('');
+            var psoCells = psos.map(function(ps) { var w = psoRow[ps] || 0; return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>'; }).join('');
+            return '<tr><td><strong>' + coCode + '</strong></td>' + poCells + psoCells + '</tr>';
         }).join('');
 
-        const psoHdr = psos.map(function(p) { return '<th>' + p + '</th>'; }).join('');
-        const psoAttRow = psos.map(function(p) {
-            const v = psoAtt[p] != null ? psoAtt[p] : 0;
-            const pct = v / 3 * 100;
-            return '<td><strong style="color:' + clr(pct) + '">' + v + '</strong></td>';
+        // Attainment footer row
+        var prow = pos.map(function(p) {
+            var v = poAtt[p] != null ? poAtt[p] : 0;
+            var pctV = v / 3 * 100;
+            return '<td><strong style="color:' + clr(pctV) + '">' + v + '</strong></td>';
+        }).join('');
+        var psoAttRow = psos.map(function(p) {
+            var v = psoAtt[p] != null ? psoAtt[p] : 0;
+            var pctV = v / 3 * 100;
+            return '<td><strong style="color:' + clr(pctV) + '">' + v + '</strong></td>';
         }).join('');
 
-        let html = '<div class="data-card">' +
+        var html = '<div class="data-card">' +
             '<div class="data-card-header">' +
             '<div class="data-card-title"><span class="course-code">' + c.courseCode + '</span>' + c.courseName + '</div>' +
             '<span style="font-size:12px;color:var(--text-3)">' + c.studentCount + ' students · Avg ' + pct(c.avgAttainment) + '</span>' +
             '</div>';
 
-        if (pos.length) {
-            html += '<div style="padding:10px 18px 4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-3)">CO-PO Mapping</div>' +
+        if (hasPo || hasPso) {
+            html += '<div style="padding:10px 18px 4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-3)">CO-PO' + (hasPso ? ' / CO-PSO' : '') + ' Mapping</div>' +
                 '<div class="table-wrap"><table>' +
-                '<thead><tr><th>CO</th>' + phdr + '</tr></thead>' +
-                '<tbody>' + (rows || '<tr><td colspan="' + (pos.length + 1) + '" style="text-align:center;color:var(--text-3);padding:16px">No CO-PO data.</td></tr>') +
-                (pos.length ? '<tr style="background:var(--bg)"><td><strong>PO Attainment</strong></td>' + prow + '</tr>' : '') +
-                '</tbody></table></div>';
-        }
-
-        if (psos.length) {
-            html += '<div style="padding:10px 18px 4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-3)">CO-PSO Mapping</div>' +
-                '<div class="table-wrap"><table>' +
-                '<thead><tr><th>CO</th>' + psoHdr + '</tr></thead>' +
-                '<tbody>' + buildPsoRows(psoMatrix, psos) +
-                '<tr style="background:var(--bg)"><td><strong>PSO Attainment</strong></td>' + psoAttRow + '</tr>' +
+                '<thead><tr><th>CO</th>' + phdr + psoHdr + '</tr></thead>' +
+                '<tbody>' + (rows || '<tr><td colspan="' + (pos.length + psos.length + 1) + '" style="text-align:center;color:var(--text-3);padding:16px">No mapping data.</td></tr>') +
+                '<tr style="background:var(--bg)"><td><strong>Attainment</strong></td>' + prow + psoAttRow + '</tr>' +
                 '</tbody></table></div>';
         }
 
@@ -594,17 +594,19 @@ function renderMapping(courses) {
 }
 
 // ═══ COURSE DROPDOWNS ═════════════════════════════════════════
-function fillCourseDropdowns(courses) {
+function fillCourseDropdowns(courses, allCourses) {
     const fsel = document.getElementById('sel_course_filter');
     const prev = fsel.value;
     fsel.innerHTML = '<option value="">-- All Courses --</option>';
     courses.forEach(function(c) { fsel.add(new Option(c.courseCode + ' – ' + c.courseName, c.courseCode)); });
     if (prev) fsel.value = prev;
     fsel.disabled = courses.length === 0;
-    // Student tab dropdown: use course ID as value so backend can find exact entity
+    // Student tab dropdown: use allCourses (includes BCS/MSC/MTech/BCA courses)
+    // so student performance works for all programmes, not just those with marks
+    const studentCourses = allCourses && allCourses.length > 0 ? allCourses : courses;
     const ssel = document.getElementById('sel_course');
     ssel.innerHTML = '<option value="">-- Select a Course --</option>';
-    courses.forEach(function(c) { ssel.add(new Option(c.courseCode + ' – ' + c.courseName, c.id)); });
+    studentCourses.forEach(function(c) { ssel.add(new Option(c.courseCode + ' – ' + c.courseName, c.id)); });
 }
 
 // ═══ STUDENTS ═════════════════════════════════════════════════
@@ -622,17 +624,14 @@ async function loadStudents() {
         if (S.batchYear) url += '&batchYear=' + S.batchYear;
         const d = await get(url);
         if (d.error) { el.innerHTML = '<div style="color:var(--danger);padding:16px">' + d.error + '</div>'; return; }
-        const students = d.students || [], coCodes = d.coCodes || [], poHeaders = d.poHeaders || [];
+        const students = d.students || [], coCodes = d.coCodes || [];
         if (!students.length) { el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)"><i class="fas fa-user-slash" style="font-size:28px;opacity:.3;display:block;margin-bottom:12px"></i>No student data for this course.<br><small>Make sure marks Excel files are uploaded for this course.</small></div>'; return; }
         const coHdrs = coCodes.map(function(c) { return '<th>' + c + '</th>'; }).join('');
-        const poHdrs = poHeaders.map(function(p) { return '<th>' + p + ' <span style="font-weight:400;font-size:9px;opacity:.7">(0-3)</span></th>'; }).join('');
         const rows = students.map(function(s) {
             const coTds = coCodes.map(function(c) { const v = s[c] != null ? s[c] : 0; return '<td class="co-pct-cell ' + (v < 40 ? 'low' : '') + '">' + v + '%</td>'; }).join('');
-            const poTds = poHeaders.map(function(p) { const v = (s.poAttainment || {})[p] != null ? (s.poAttainment || {})[p] : 0; return '<td style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</td>'; }).join('');
-            const overall = s.overall != null ? s.overall : 0;
-            return '<tr><td style="font-family:var(--mono);font-size:12px">' + (s.enrollmentNo || '—') + '</td><td>' + (s.name || '—') + '</td>' + coTds + poTds + '<td><strong style="color:' + clr(overall) + '">' + overall + '%</strong></td><td><span class="badge ' + (s.status === 'Pass' ? 'badge-green' : 'badge-red') + '">' + s.status + '</span></td></tr>';
+            return '<tr><td style="font-family:var(--mono);font-size:12px">' + (s.enrollmentNo || '—') + '</td><td>' + (s.name || '—') + '</td>' + coTds + '</tr>';
         }).join('');
-        el.innerHTML = '<div class="data-card"><div class="data-card-header"><div class="data-card-title"><i class="fas fa-users" style="color:var(--accent)"></i> ' + (d.courseCode || '') + ': ' + (d.courseName || '') + '</div><span style="font-size:12px;color:var(--text-3)">' + students.length + ' students</span></div><div class="table-wrap"><table><thead><tr><th>Enrollment</th><th>Name</th>' + coHdrs + poHdrs + '<th>Overall</th><th>Status</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+        el.innerHTML = '<div class="data-card"><div class="data-card-header"><div class="data-card-title"><i class="fas fa-users" style="color:var(--accent)"></i> ' + (d.courseCode || '') + ': ' + (d.courseName || '') + '</div><span style="font-size:12px;color:var(--text-3)">' + students.length + ' students</span></div><div class="table-wrap"><table><thead><tr><th>Enrollment</th><th>Name</th>' + coHdrs + '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
     } catch (e) { el.innerHTML = '<div style="color:var(--danger);padding:16px">Error: ' + e.message + '</div>'; }
 }
 
