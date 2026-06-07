@@ -9,7 +9,7 @@ const API = (function() {
     if (h === 'localhost' || h === '127.0.0.1') {
         return p === '8080' ? '' : 'http://localhost:8080';
     }
-    return 'https://obe-9sxe.onrender.com';
+    return 'https://obe-backend-qf77.onrender.com';
 })();
 
 // ═══ STATE ════════════════════════════════════════════════════
