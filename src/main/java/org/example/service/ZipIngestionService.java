@@ -3,6 +3,7 @@ package org.example.service;
 import lombok.RequiredArgsConstructor;
 import org.example.entity.*;
 import org.example.repository.*;
+import org.example.util.EnrollmentCodeUtil;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -42,6 +43,7 @@ public class ZipIngestionService {
     private final QuestionCOMappingRepository questionCOMappingRepository;
     private final CORepository coRepository;
     private final CourseService           courseService;
+    private final EnrollmentCodeUtil      enrollmentCodeUtil;
 
     // ─────────────────────────────────────────────────────────────────────────
     //  MAIN ENTRY — process uploaded ZIP containing multiple .xlsx files
@@ -312,6 +314,10 @@ public class ZipIngestionService {
             Map<String, Batch>   batchCache    = new HashMap<>();
             Map<String, QuestionCOMapping> mappingCache = new HashMap<>();  // NEW: Cache for mappings
 
+            // ── Existing marks set for deduplication ──────────────────────────
+            // Loaded lazily the first time we see the course. Key: studentId + "|" + question + "|" + examType
+            Set<String> existingMarkKeys = null;  // null = not yet loaded
+
             List<StudentMark> batch = new ArrayList<>();
             int saved = 0;
             
@@ -435,6 +441,14 @@ public class ZipIngestionService {
                 if (processedCourseId == null) {
                     processedCourseId = course.getId();
                     processedCourseKey = courseKey;
+                    // Load existing marks for this course to prevent duplicates on re-upload
+                    existingMarkKeys = new HashSet<>();
+                    for (StudentMark existing : studentMarkRepository.findByCourseIdWithStudent(processedCourseId)) {
+                        if (existing.getStudent() != null && existing.getQuestion() != null && existing.getExamType() != null) {
+                            existingMarkKeys.add(existing.getStudent().getId() + "|" + existing.getQuestion() + "|" + existing.getExamType());
+                        }
+                    }
+                    System.out.println("  [DEDUP] Loaded " + existingMarkKeys.size() + " existing mark keys for course " + processedCourseKey);
                 }
 
                 // ── AUTO-CREATE QUESTION-CO MAPPINGS ──────────────────────────
@@ -491,26 +505,44 @@ public class ZipIngestionService {
                     }
                 }
 
-                // ── Resolve Student ───────────────────────────────────────────
+                // ── Resolve Student ────────────────────────────────────────────
                 final Program fprog = program;
                 final Batch fbo = batchObj;
-                // Specialization resolution priority:
-                //   1. Course's own batch specialization (if not null)
-                //   2. Parsed from the program name string in column 19
-                // This ensures students from shared/common courses (where batch.spec=null)
-                // still get their correct specialization set during ingestion.
-                Specialization courseSpec = (fbo != null) ? fbo.getSpecialization() : null;
-                // NOTE: Do NOT resolve spec from the program string in the marks Excel.
-                // The program column in marks files is unreliable (e.g. vendor name "IMAGINXP"
-                // for the whole batch incorrectly tags all students as UX/UI).
-                // Specialization is assigned AFTER marks upload, by uploading the enrollment
-                // Excel via POST /students/assign-specialization.
-                final Specialization finalSpec = courseSpec;
+
+                // Resolve specialization from ENROLLMENT NUMBER (most reliable source).
+                // Using the course batch's specialization causes cross-contamination:
+                // e.g. a BTech DS student (code "42") whose ENMA101 mark lands in the
+                // batch-1 (UI/UX) course entity would be tagged as UI/UX instead of DS.
+                // Enrollment code is always programme-aware and unique per specialization.
+                Specialization enrollmentSpec = null;
+                try {
+                    String specCode = enrollmentCodeUtil.extractSpecCode(enrollmentNo);
+                    String specName = specCode != null ? enrollmentCodeUtil.getSpecNameForCode(specCode) : null;
+                    if (specName != null) {
+                        final String fsn = specName;
+                        enrollmentSpec = specializationRepository.findByProgram(program).stream()
+                                .filter(s -> fsn.equalsIgnoreCase(s.getName())
+                                          || s.getName().toLowerCase().contains(fsn.toLowerCase())
+                                          || fsn.toLowerCase().contains(s.getName().toLowerCase()))
+                                .findFirst().orElse(null);
+                    }
+                } catch (Exception ignored) {}
+
+                // Fall back to course-batch spec only when enrollment lookup returns nothing
+                // (e.g. KR-prefix lateral entry students without a standard code)
+                final Specialization finalSpec = (enrollmentSpec != null) ? enrollmentSpec
+                        : ((fbo != null) ? fbo.getSpecialization() : null);
+
                 Student student = studentCache.computeIfAbsent(enrollmentNo, id -> {
                     Student existing = studentRepository.findByEnrollmentNumber(id).orElse(null);
                     if (existing != null) {
-                        // Update specialization if not yet set OR if we now have a better one
-                        if (existing.getSpecialization() == null && finalSpec != null) {
+                        // Update specialization when:
+                        // a) not yet set, OR
+                        // b) currently set to a wrong-program specialization (cross-program contamination)
+                        boolean wrongProgram = existing.getSpecialization() != null
+                                && existing.getSpecialization().getProgram() != null
+                                && !existing.getSpecialization().getProgram().getId().equals(program.getId());
+                        if ((existing.getSpecialization() == null || wrongProgram) && finalSpec != null) {
                             existing.setSpecialization(finalSpec);
                             return studentRepository.save(existing);
                         }
@@ -525,6 +557,7 @@ public class ZipIngestionService {
                     return studentRepository.save(s);
                 });
 
+
                 // ── Create one StudentMark per question ───────────────────────
                 for (Map.Entry<String, Integer> qe : labelToMarksCol.entrySet()) {
                     String qLabel  = qe.getKey();
@@ -536,6 +569,13 @@ public class ZipIngestionService {
                     if (maxMarks <= 0) continue;  // skip if no max — unusable
                     // Allow negative marks (deductions) — clamp to -maxMarks floor
                     if (marksScored < -maxMarks) marksScored = -maxMarks;
+
+                    // ── Deduplication: skip if this mark already exists in DB ────
+                    if (existingMarkKeys != null) {
+                        String dupKey = student.getId() + "|" + qLabel + "|" + examType;
+                        if (existingMarkKeys.contains(dupKey)) continue;
+                        existingMarkKeys.add(dupKey);  // track so batch-within-file doesn't also dup
+                    }
 
                     StudentMark sm = new StudentMark();
                     sm.setStudent(student);

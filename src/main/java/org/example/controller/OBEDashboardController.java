@@ -159,25 +159,41 @@ public class OBEDashboardController {
         int totalStudents = 0, atRiskCount = 0;
         Map<String, List<Double>> branchPoAtt = new LinkedHashMap<>(), branchPsoAtt = new LinkedHashMap<>();
 
+        // Compute year prefix from batchYear — used to filter marks to the correct batch cohort
+        String attYearPrefix = null;
+        if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
+            try {
+                int fy = Integer.parseInt(batchYear);
+                attYearPrefix = String.format("%02d", fy % 100); // 2023→"23", 2024→"24"
+            } catch (NumberFormatException ignored) {}
+        }
+        final String finalAttYearPrefix = attYearPrefix;
+
         for (Course course : courses) {
             final Long specId = specializationId;
             List<StudentMark> marks;
             if (specId != null) {
-                marks = studentMarkRepository.findByCourseIdAndSpecId(course.getId(), specId);
-                // Fallback: use enrollment spec codes when specialization_id is not set on students
+                // Use year-aware queries to match exactly what student performance shows
+                marks = new ArrayList<>(studentMarkRepository
+                        .findByCourseAndSpecIdAndYear(course, specId, finalAttYearPrefix));
+                // Fallback: enrollment spec codes (year-aware)
                 if (marks.isEmpty()) {
                     List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specId);
                     if (!specCodes.isEmpty()) {
-                        marks = studentMarkRepository.findByCourseIdAndEnrollmentSpecCodes(course.getId(), specCodes);
+                        marks = new ArrayList<>(studentMarkRepository
+                                .findByCourseAndEnrollmentSpecCodesAndYear(course, specCodes, finalAttYearPrefix));
                     }
                 }
-                // Last resort: fall back to ALL marks for the course
-                if (marks.isEmpty()) {
+                // Last resort: all marks for the course (no year filter since spec already filters)
+                if (marks.isEmpty() && finalAttYearPrefix == null) {
                     marks = studentMarkRepository.findByCourse(course);
                 }
             } else {
                 marks = studentMarkRepository.findByCourse(course);
             }
+
+            // Skip courses with no marks for this filter combination
+            if (marks.isEmpty()) continue;
 
             List<CO> cos = new ArrayList<>(coRepository.findByCourse(course));
 
@@ -354,17 +370,20 @@ public class OBEDashboardController {
                     long studentCount;
                     try {
                         if (specId != null) {
-                            studentCount = studentMarkRepository.countDistinctStudentsByCourseAndSpecialization(c, specId);
-                            // Fallback: use enrollment spec codes when specialization_id is not assigned
+                            // Use year-aware count so this matches student performance exactly
+                            studentCount = studentMarkRepository
+                                    .countDistinctStudentsByCourseAndSpecializationAndYear(
+                                            c, specId, finalCourseListYearPrefix);
+                            // Fallback: enrollment spec codes (also year-aware)
                             if (studentCount == 0) {
                                 List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specId);
                                 if (!specCodes.isEmpty()) {
-                                    studentCount = studentMarkRepository.countDistinctStudentsByCourseAndSpecCodes(c, specCodes);
+                                    studentCount = studentMarkRepository
+                                            .countDistinctStudentsByCourseAndSpecCodesAndYear(
+                                                    c, specCodes, finalCourseListYearPrefix);
                                 }
                             }
-                            // Fallback: count null-spec students of the same programme + batch year.
-                            // Only for single-spec programmes (MCA, BCA) where null-spec students
-                            // unambiguously belong to the one available specialization.
+                            // Fallback: null-spec students (single-spec programmes only, year-aware)
                             if (studentCount == 0 && allowNullSpecCountFallback) {
                                 studentCount = studentMarkRepository
                                         .countDistinctStudentsByCourseAndNullSpecAndProgram(
@@ -376,6 +395,7 @@ public class OBEDashboardController {
                     } catch (Exception e) {
                         studentCount = studentMarkRepository.countDistinctStudentsByCourse(c);
                     }
+                    if (studentCount == 0) return null; // exclude courses with no data for this filter
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("id", c.getId());
                     m.put("code", c.getCourseCode());
@@ -383,8 +403,10 @@ public class OBEDashboardController {
                     m.put("studentCount", (int) studentCount);
                     return m;
                 })
+                .filter(Objects::nonNull)
                 .collect(Collectors.toList()));
     }
+
 
     @GetMapping("/students")
     @Transactional(readOnly = true)

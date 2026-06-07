@@ -50,6 +50,39 @@ public interface StudentMarkRepository extends JpaRepository<StudentMark, Long> 
             @Param("specId") Long specId);
 
     /**
+     * Year-prefix-aware version of findByCourseAndSpecId.
+     * yearPrefix = "23" → only students whose enrollmentNumber starts with "23".
+     * Pass null to skip year filtering (returns all years).
+     */
+    @Query("SELECT sm FROM StudentMark sm " +
+           "JOIN FETCH sm.student st " +
+           "LEFT JOIN FETCH st.batch b " +
+           "LEFT JOIN FETCH b.specialization " +
+           "JOIN st.specialization sp " +
+           "WHERE sm.course = :course AND sp.id = :specId " +
+           "AND (:yearPrefix IS NULL OR SUBSTRING(st.enrollmentNumber, 1, 2) = :yearPrefix)")
+    List<StudentMark> findByCourseAndSpecIdAndYear(
+            @Param("course") Course course,
+            @Param("specId") Long specId,
+            @Param("yearPrefix") String yearPrefix);
+
+    /**
+     * Year-prefix-aware version of findByCourseAndEnrollmentSpecCodes.
+     */
+    @Query("SELECT sm FROM StudentMark sm " +
+           "JOIN FETCH sm.student st " +
+           "LEFT JOIN FETCH st.batch b " +
+           "LEFT JOIN FETCH b.specialization " +
+           "WHERE sm.course = :course AND SUBSTRING(st.enrollmentNumber, 5, 2) IN :specCodes " +
+           "AND (:yearPrefix IS NULL OR SUBSTRING(st.enrollmentNumber, 1, 2) = :yearPrefix)")
+    List<StudentMark> findByCourseAndEnrollmentSpecCodesAndYear(
+            @Param("course") Course course,
+            @Param("specCodes") java.util.List<String> specCodes,
+            @Param("yearPrefix") String yearPrefix);
+
+
+
+    /**
      * Fallback: fetch marks for a course filtered by enrollment number prefix.
      * Used when students have not had specialization_id set yet (legacy data).
      * The enrollment prefix encodes the branch, e.g. "2401" + "41" = Cyber Security.
@@ -141,6 +174,32 @@ public interface StudentMarkRepository extends JpaRepository<StudentMark, Long> 
     long countDistinctStudentsByCourseAndSpecialization(
             @Param("course") Course course,
             @Param("specializationId") Long specializationId);
+
+    /**
+     * Same as above but also filters by the 2-digit enrollment year prefix.
+     * e.g. yearPrefix="23" returns only students whose enrollment starts with "23".
+     * Pass null to skip year filtering.
+     */
+    @Query("SELECT COUNT(DISTINCT sm.student.id) FROM StudentMark sm " +
+           "JOIN sm.student st " +
+           "JOIN st.specialization sp " +
+           "WHERE sm.course = :course AND sp.id = :specializationId " +
+           "AND (:yearPrefix IS NULL OR SUBSTRING(st.enrollmentNumber, 1, 2) = :yearPrefix)")
+    long countDistinctStudentsByCourseAndSpecializationAndYear(
+            @Param("course") Course course,
+            @Param("specializationId") Long specializationId,
+            @Param("yearPrefix") String yearPrefix);
+
+    /** Count distinct students by course and enrollment spec-codes also filtered by year prefix. */
+    @Query("SELECT COUNT(DISTINCT sm.student.id) FROM StudentMark sm " +
+           "JOIN sm.student st " +
+           "WHERE sm.course = :course AND SUBSTRING(st.enrollmentNumber, 5, 2) IN :specCodes " +
+           "AND (:yearPrefix IS NULL OR SUBSTRING(st.enrollmentNumber, 1, 2) = :yearPrefix)")
+    long countDistinctStudentsByCourseAndSpecCodesAndYear(
+            @Param("course") Course course,
+            @Param("specCodes") java.util.List<String> specCodes,
+            @Param("yearPrefix") String yearPrefix);
+
 
     /**
      * Fallback query: fetch marks for a course where the student has NULL specialization

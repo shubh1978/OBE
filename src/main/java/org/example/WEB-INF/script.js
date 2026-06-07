@@ -74,14 +74,19 @@ async function onProgChange() {
     try {
         const batches = await get('/dashboard/batches?programId=' + S.programId);
         const b = document.getElementById('sel_batch');
-        batches.forEach(function(x) { b.add(new Option(x.label, x.year)); });
-        b.disabled = batches.length === 0;
-        // Auto-select the most recent batch (first in list, server returns newest first)
-        if (batches.length > 0) {
-            b.value = batches[0].year;
-            S.batchYear = batches[0].year;
+        // Filter out virtual 2024+ batches — only show actual DB batch entries (2023 and earlier).
+        // Students who enrolled in 2024 still belong to the 2023 DB batch entity.
+        const displayBatches = batches.filter(function(x) { return parseInt(x.year) <= 2023; });
+        const finalBatches = displayBatches.length > 0 ? displayBatches : batches;
+        finalBatches.forEach(function(x) { b.add(new Option(x.label, x.year)); });
+        b.disabled = finalBatches.length === 0;
+        // Auto-select the most recent valid batch (first in list, server returns newest first)
+        if (finalBatches.length > 0) {
+            b.value = finalBatches[0].year;
+            S.batchYear = finalBatches[0].year;
         }
     } catch (e) { console.warn('batches', e); }
+
     try {
         const specs = await get('/dashboard/specializations?programId=' + S.programId);
         const s = document.getElementById('sel_spec');
@@ -391,11 +396,16 @@ function renderDashboard(d) {
         var hasPo = allPoHdrs.length > 0, hasPso = allPsoHdrs.length > 0;
         var tRows = courses.filter(function(c) { return c.coAttainments && c.coAttainments.length > 0; }).map(function(c) {
             var poTds = allPoHdrs.map(function(p) {
-                var v = c.poAttainment && c.poAttainment[p] != null ? c.poAttainment[p] : 0;
+                // Show '–' if this PO is not in the attainment map (course has no CO mapped to it)
+                var mapped = c.poAttainment && Object.prototype.hasOwnProperty.call(c.poAttainment, p);
+                if (!mapped) return '<td style="text-align:center;color:var(--text-3);font-size:11px">–</td>';
+                var v = c.poAttainment[p];
                 return '<td style="text-align:center;color:' + clr(v/3*100) + ';font-weight:600;font-size:11px">' + v + '</td>';
             }).join('');
             var psoTds = allPsoHdrs.map(function(p) {
-                var v = c.psoAttainment && c.psoAttainment[p] != null ? c.psoAttainment[p] : 0;
+                var mapped = c.psoAttainment && Object.prototype.hasOwnProperty.call(c.psoAttainment, p);
+                if (!mapped) return '<td style="text-align:center;color:var(--text-3);font-size:11px">–</td>';
+                var v = c.psoAttainment[p];
                 return '<td style="text-align:center;color:' + clr(v/3*100) + ';font-weight:600;font-size:11px">' + v + '</td>';
             }).join('');
             return '<tr>' +
@@ -464,18 +474,21 @@ function renderDashboard(d) {
         }).join('');
         const poHeaders = c.poHeaders || [];
         const poAtt = c.poAttainment || {};
-        const poRows = poHeaders.length > 0 ? '<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
+        // Only show POs that are actually mapped (exist as keys in poAtt)
+        const mappedPoHeaders = poHeaders.filter(function(po) { return Object.prototype.hasOwnProperty.call(poAtt, po); });
+        const poRows = mappedPoHeaders.length > 0 ? '<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
             '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;">' +
-            poHeaders.map(function(po) {
-                const v = poAtt[po] != null ? poAtt[po] : 0;
+            mappedPoHeaders.map(function(po) {
+                const v = poAtt[po];
                 return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + po + ':</strong><span style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</span></div>';
             }).join('') + '</div></div>' : '';
         const psoHeaders = c.psoHeaders || [];
         const psoAtt = c.psoAttainment || {};
-        const psoRows = psoHeaders.length > 0 ? '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PSO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
+        const mappedPsoHeaders = psoHeaders.filter(function(pso) { return Object.prototype.hasOwnProperty.call(psoAtt, pso); });
+        const psoRows = mappedPsoHeaders.length > 0 ? '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PSO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
             '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;">' +
-            psoHeaders.map(function(pso) {
-                const v = psoAtt[pso] != null ? psoAtt[pso] : 0;
+            mappedPsoHeaders.map(function(pso) {
+                const v = psoAtt[pso];
                 return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + pso + ':</strong><span style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</span></div>';
             }).join('') + '</div></div>' : '';
         return '<div class="course-card">' +
@@ -622,6 +635,7 @@ async function loadStudents() {
         let url = '/dashboard/students?courseId=' + encodeURIComponent(courseId);
         if (S.specId) url += '&specializationId=' + S.specId;
         if (S.batchYear) url += '&batchYear=' + S.batchYear;
+
         const d = await get(url);
         if (d.error) { el.innerHTML = '<div style="color:var(--danger);padding:16px">' + d.error + '</div>'; return; }
         const students = d.students || [], coCodes = d.coCodes || [];
