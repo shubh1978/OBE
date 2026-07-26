@@ -5,8 +5,8 @@
 //  🚀 PROD   : LOCAL_MODE = false  → hits Render backend URL
 // ───────────────────────────────────────────────────────────────
 
-// Auto-detects if running locally (localhost/127.0.0.1) vs deployed production domain
-const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+// Auto-detects if running locally (localhost/127.0.0.1/file://) vs deployed production domain
+const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:' || !window.location.hostname;
 
 // ── 🚀 PRODUCTION BACKEND URL ──────────────────────────────────
 const PROD_URL = 'https://obe-backend-qf77.onrender.com';
