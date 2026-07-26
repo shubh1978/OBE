@@ -8,13 +8,13 @@
 // Auto-detects if running locally (localhost/127.0.0.1) vs deployed production domain
 const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-// ── 🚀 PRODUCTION URL ──────────────────────────────────────────
-const PROD_URL = 'https://obe-application.onrender.com'; // or relative '' if served by Spring Boot
+// ── 🚀 PRODUCTION BACKEND URL ──────────────────────────────────
+const PROD_URL = 'https://obe-backend-qf77.onrender.com';
 // ───────────────────────────────────────────────────────────────
 
 const API = IS_LOCAL
     ? (window.location.port === '8080' ? '' : 'http://localhost:8080')
-    : (window.location.port === '8080' ? '' : (window.location.origin.includes('onrender.com') || window.location.origin.includes('render') ? '' : PROD_URL));
+    : (window.location.port === '8080' ? '' : PROD_URL);
 
 // ═══════════════════════════════════════════════════════════════
 
