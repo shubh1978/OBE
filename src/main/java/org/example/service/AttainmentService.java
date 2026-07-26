@@ -41,19 +41,28 @@ public class AttainmentService {
      */
     private List<StudentMark> loadMarksForSpec(Long courseId, Long specializationId) {
         if (specializationId == null) {
-            return studentMarkRepository.findByCourseId(courseId);
+            return studentMarkRepository.findByCourseIdWithStudent(courseId);
         }
         // Primary: student.specialization_id
         List<StudentMark> marks = studentMarkRepository.findByCourseIdAndSpecId(courseId, specializationId);
         if (!marks.isEmpty()) return marks;
 
-        // Fallback: enrollment spec codes (e.g. "19" for BTech Data Science)
+        // Fallback #1: enrollment spec codes (e.g. "19" for BTech Data Science)
         List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specializationId);
         if (!specCodes.isEmpty()) {
             marks = studentMarkRepository.findByCourseIdAndEnrollmentSpecCodes(courseId, specCodes);
+            if (!marks.isEmpty()) return marks;
+        }
+
+        // Fallback #2 (cross-instance): marks stored under a different course instance
+        // with the same course_code (happens when ingestion picks the first course found)
+        org.example.entity.Course c = courseRepository.findById(courseId).orElse(null);
+        if (c != null && c.getCourseCode() != null && !c.getCourseCode().isBlank()) {
+            marks = studentMarkRepository.findByCourseCodeAndSpecId(c.getCourseCode(), specializationId);
         }
         return marks;
     }
+
 
     /**
      * Calculate overall CO attainment for a course (combines mid-term and end-term).
@@ -81,158 +90,156 @@ public class AttainmentService {
      */
     public Map<String, Double> calculateCOAttainment(Long courseId, Long specializationId) {
         List<StudentMark> marks = loadMarksForSpec(courseId, specializationId);
-        List<QuestionCOMapping> mappings = questionCOMappingRepository.findByCourseId(courseId);
+        if (marks.isEmpty()) return new HashMap<>();
 
-        if (marks.isEmpty() || mappings.isEmpty()) {
-            return new HashMap<>();
+        // Load QCO mappings for this course; always check by course_code to get the most complete set.
+        List<QuestionCOMapping> mappings = questionCOMappingRepository.findByCourseId(courseId);
+        if (courseId != null) {
+            org.example.entity.Course c = courseRepository.findById(courseId).orElse(null);
+            if (c != null && c.getCourseCode() != null) {
+                List<QuestionCOMapping> allMappings = questionCOMappingRepository.findByCourseCode(c.getCourseCode());
+                if (allMappings.size() > mappings.size()) {
+                    mappings = allMappings;
+                }
+            }
         }
+        if (mappings.isEmpty()) return new HashMap<>();
+
+
+        // Determine the course code for normalising CO codes
+        String courseCode = null;
+        if (!mappings.isEmpty() && mappings.get(0).getCourse() != null) {
+            // Use the course for which marks exist
+            org.example.entity.Course c = courseRepository.findById(courseId).orElse(null);
+            courseCode = c != null ? c.getCourseCode() : mappings.get(0).getCourse().getCourseCode();
+        }
+        final String finalCourseCode = courseCode;
+
+        // Helper: normalize CO code from mapping (may be "ENCS301-CO2" or "CO2") to "COURSECODE-CO#"
+        java.util.function.Function<QuestionCOMapping, String> toCoCode = qm -> {
+            if (qm.getCo() == null || qm.getCo().getCode() == null) return null;
+            String raw = qm.getCo().getCode();
+            String coNum = raw.replaceAll("^.*?-?(CO\\d+)$", "$1"); // "CO2"
+            return (finalCourseCode != null ? finalCourseCode : "") + "-" + coNum;
+        };
 
         // ── Step 1: separate marks by exam type ───────────────────────────────────
         List<StudentMark> midTermMarks = new ArrayList<>();
         List<StudentMark> endTermMarks = new ArrayList<>();
         for (StudentMark m : marks) {
-            if ("end_term".equalsIgnoreCase(m.getExamType())) {
-                endTermMarks.add(m);
-            } else {
-                midTermMarks.add(m);
-            }
+            if ("end_term".equalsIgnoreCase(m.getExamType())) endTermMarks.add(m);
+            else midTermMarks.add(m);  // mid_term, or anything else (legacy)
         }
 
-        // ── Step 2: build coMaxMarks from QuestionCOMapping ───────────────────────
-        // For end-term alternative questions (Q2a/Q2b, Q3a/Q3b, Q4a/Q4b, Q5a/Q5b)
-        // the max marks for the CO contribution of that group = max(a_max, b_max).
-        // We compute this separately for end-term.
-        Map<Long, Double> coMaxMarks = new HashMap<>();
+        // Mid-term marks can be stored as individual M1/M2/M3/M4 (new format)
+        // OR as a single "MID" label (old format). The QCO mapping uses either.
+        // No special pre-processing needed — qToCoCode handles both formats.
 
-        // Mid-term: straightforward sum of all mapped question maxMarks
+        // ── Step 2: build coMaxMarks keyed by CO code ─────────────────────────────
+        Map<String, Double> coMaxMarks = new HashMap<>();
+
+        // Mid-term + simple end-term questions: sum of maxMarks
         for (QuestionCOMapping q : mappings) {
-            // Only count mid-term relevant mappings (all non-alternative questions)
             if (!isEndTermAlternativeQuestion(q.getQuestionLabel())) {
-                Long coId = q.getCo().getId();
-                coMaxMarks.merge(coId, q.getMaxMarks(), Double::sum);
+                String cc = toCoCode.apply(q);
+                if (cc != null) coMaxMarks.merge(cc, q.getMaxMarks(), Double::sum);
             }
         }
-
-        // End-term: for Q2-Q5, keep only the higher maxMarks of (a) vs (b) per CO
-        // Group: questionBase (e.g. "Q2") -> coId -> max of a_max, b_max
-        Map<String, Map<Long, Double>> endTermBaseMaxPerCO = new HashMap<>();
+        // End-term alternative questions (Q2a/Q2b etc.): keep max per CO per base
+        Map<String, Map<String, Double>> endTermBaseMaxPerCO = new HashMap<>();
         for (QuestionCOMapping q : mappings) {
             if (isEndTermAlternativeQuestion(q.getQuestionLabel())) {
-                String base = getAlternativeQuestionBase(q.getQuestionLabel()); // e.g. "Q2"
-                Long coId = q.getCo().getId();
-                endTermBaseMaxPerCO
-                    .computeIfAbsent(base, k -> new HashMap<>())
-                    .merge(coId, q.getMaxMarks(), Double::max);
+                String base = getAlternativeQuestionBase(q.getQuestionLabel());
+                String cc = toCoCode.apply(q);
+                if (cc != null)
+                    endTermBaseMaxPerCO.computeIfAbsent(base, k -> new HashMap<>())
+                                      .merge(cc, q.getMaxMarks(), Double::max);
             }
         }
-        // Add end-term alternative max marks into coMaxMarks
-        for (Map<Long, Double> coMaxMap : endTermBaseMaxPerCO.values()) {
-            for (Map.Entry<Long, Double> e : coMaxMap.entrySet()) {
-                coMaxMarks.merge(e.getKey(), e.getValue(), Double::sum);
-            }
+        for (Map<String, Double> perCO : endTermBaseMaxPerCO.values())
+            perCO.forEach((cc, v) -> coMaxMarks.merge(cc, v, Double::sum));
+
+        // ── Step 3: build questionLabel → coCode lookup (multi-valued) ────────────
+        Map<String, List<String>> qToCoCode = new HashMap<>();
+        for (QuestionCOMapping q : mappings) {
+            if (q.getQuestionLabel() == null) continue;
+            String cc = toCoCode.apply(q);
+            if (cc != null)
+                qToCoCode.computeIfAbsent(q.getQuestionLabel().toUpperCase(), k -> new ArrayList<>()).add(cc);
         }
+        // Deduplicate per question
+        qToCoCode.replaceAll((q, list) -> list.stream().distinct().collect(java.util.stream.Collectors.toList()));
 
-        // Also add end-term non-alternative question maxMarks (unlikely but safe)
-        // (Our mappings may include e.g. Q1 in end-term which is not alternative)
-        // We rely on the fact that mid-term questions are separate label-space from end-term
-        // so duplicate label collision is OK as-is.
+        // ── Step 4: aggregate student marks per CO code ───────────────────────────
+        Map<Long, Map<String, Double>> studentCOMarks = new HashMap<>();
 
-        // ── Step 3: aggregate student marks per CO ────────────────────────────────
-        // Map: studentId -> coId -> achieved marks
-        Map<Long, Map<Long, Double>> studentCOMarks = new HashMap<>();
-
-        // Mid-term marks: straightforward sum
+        // Mid-term marks
         for (StudentMark mark : midTermMarks) {
-            Optional<QuestionCOMapping> map = mappings.stream()
-                    .filter(m -> m.getQuestionLabel().equalsIgnoreCase(mark.getQuestion()))
-                    .findFirst();
-            if (map.isPresent()) {
-                Long coId = map.get().getCo().getId();
-                Long studentId = mark.getStudent().getId();
-                studentCOMarks.computeIfAbsent(studentId, k -> new HashMap<>())
-                        .merge(coId, mark.getMarks(), Double::sum);
-            }
+            if (mark.getQuestion() == null) continue;
+            List<String> targets = qToCoCode.get(mark.getQuestion().toUpperCase());
+            if (targets == null) continue;
+            Long sid = mark.getStudent().getId();
+            for (String cc : targets)
+                studentCOMarks.computeIfAbsent(sid, k -> new HashMap<>())
+                              .merge(cc, mark.getMarks() != null ? mark.getMarks() : 0.0, Double::sum);
         }
 
-        // End-term marks: for Q2-Q5 alternatives, take max(a, b) per question-base per student
-        // Map: studentId -> questionBase -> (coId, maxMarksObtained)
-        Map<Long, Map<String, double[]>> endTermAltBest = new HashMap<>(); // [0]=marks, [1]=maxPossible
+        // End-term alternative: take best (a vs b) per student per question base+CO
+        Map<Long, Map<String, double[]>> endTermAltBest = new HashMap<>();
         List<StudentMark> endTermNonAlt = new ArrayList<>();
-
         for (StudentMark mark : endTermMarks) {
             if (isEndTermAlternativeQuestion(mark.getQuestion())) {
                 String base = getAlternativeQuestionBase(mark.getQuestion());
-                Long studentId = mark.getStudent().getId();
-                // Find the CO for this specific question
-                Optional<QuestionCOMapping> map = mappings.stream()
-                        .filter(m -> m.getQuestionLabel().equalsIgnoreCase(mark.getQuestion()))
-                        .findFirst();
-                if (map.isPresent()) {
-                    Long coId = map.get().getCo().getId();
-                    // key: base + "|" + coId so different COs on same base are tracked separately
-                    String key = base + "|" + coId;
-                    endTermAltBest.computeIfAbsent(studentId, k -> new HashMap<>())
-                            .merge(key, new double[]{mark.getMarks(), mark.getMaxMarks()},
-                                    (old, neu) -> old[0] >= neu[0] ? old : neu);
+                List<String> targets = qToCoCode.getOrDefault(mark.getQuestion().toUpperCase(), List.of());
+                Long sid = mark.getStudent().getId();
+                for (String cc : targets) {
+                    String key = base + "|" + cc;
+                    endTermAltBest.computeIfAbsent(sid, k -> new HashMap<>())
+                        .merge(key, new double[]{mark.getMarks() != null ? mark.getMarks() : 0, mark.getMaxMarks() != null ? mark.getMaxMarks() : 0},
+                               (old, neu) -> old[0] >= neu[0] ? old : neu);
                 }
             } else {
                 endTermNonAlt.add(mark);
             }
         }
-
-        // Add best-option marks to studentCOMarks
-        for (Map.Entry<Long, Map<String, double[]>> studentEntry : endTermAltBest.entrySet()) {
-            Long studentId = studentEntry.getKey();
-            for (Map.Entry<String, double[]> entry : studentEntry.getValue().entrySet()) {
-                String key = entry.getKey(); // "Q2|coId"
-                Long coId = Long.parseLong(key.substring(key.indexOf('|') + 1));
-                double achieved = entry.getValue()[0];
-                studentCOMarks.computeIfAbsent(studentId, k -> new HashMap<>())
-                        .merge(coId, achieved, Double::sum);
+        for (Map.Entry<Long, Map<String, double[]>> se : endTermAltBest.entrySet()) {
+            Long sid = se.getKey();
+            for (Map.Entry<String, double[]> e : se.getValue().entrySet()) {
+                String cc = e.getKey().substring(e.getKey().indexOf('|') + 1);
+                studentCOMarks.computeIfAbsent(sid, k -> new HashMap<>())
+                              .merge(cc, e.getValue()[0], Double::sum);
             }
         }
-
-        // End-term non-alternative marks: straightforward sum
+        // End-term non-alternative
         for (StudentMark mark : endTermNonAlt) {
-            Optional<QuestionCOMapping> map = mappings.stream()
-                    .filter(m -> m.getQuestionLabel().equalsIgnoreCase(mark.getQuestion()))
-                    .findFirst();
-            if (map.isPresent()) {
-                Long coId = map.get().getCo().getId();
-                Long studentId = mark.getStudent().getId();
-                studentCOMarks.computeIfAbsent(studentId, k -> new HashMap<>())
-                        .merge(coId, mark.getMarks(), Double::sum);
-            }
+            if (mark.getQuestion() == null) continue;
+            List<String> targets = qToCoCode.get(mark.getQuestion().toUpperCase());
+            if (targets == null) continue;
+            Long sid = mark.getStudent().getId();
+            for (String cc : targets)
+                studentCOMarks.computeIfAbsent(sid, k -> new HashMap<>())
+                              .merge(cc, mark.getMarks() != null ? mark.getMarks() : 0.0, Double::sum);
         }
 
-        // ── Step 4: calculate % students >= 40%, then assign level ───────────────
+        // ── Step 5: calculate % students >= 40% for each CO code ──────────────────
         Map<String, Double> coAttainment = new HashMap<>();
         Set<Long> allStudents = studentCOMarks.keySet();
         int totalStudents = allStudents.size();
 
-        for (Long coId : coMaxMarks.keySet()) {
-            int studentsAboveThreshold = 0;
-            double maxForCO = coMaxMarks.get(coId);
+        for (String cc : coMaxMarks.keySet()) {
+            double maxForCO = coMaxMarks.get(cc);
             if (maxForCO <= 0) continue;
-
-            for (Long studentId : allStudents) {
-                double obtained = studentCOMarks.get(studentId).getOrDefault(coId, 0.0);
-                double percentage = (obtained / maxForCO) * 100.0;
-                if (percentage >= ATTAINMENT_THRESHOLD) {
-                    studentsAboveThreshold++;
-                }
+            int above = 0;
+            for (Long sid : allStudents) {
+                double obt = studentCOMarks.get(sid).getOrDefault(cc, 0.0);
+                if ((obt / maxForCO) * 100.0 >= ATTAINMENT_THRESHOLD) above++;
             }
-
-            // Return the raw passing percentage (0-100%) for frontend CO bar display.
-            // PO/PSO methods use percentToLevel() to convert this to a level (0-3).
-            double passingPercent = totalStudents > 0
-                    ? ((double) studentsAboveThreshold / totalStudents) * 100.0
-                    : 0.0;
-
-            CO co = coRepository.findById(coId).orElse(null);
-            String coCode = co != null ? co.getCode() : "CO" + coId;
-            coAttainment.put(coCode, Math.round(passingPercent * 10.0) / 10.0);
+            double pct = totalStudents > 0 ? ((double) above / totalStudents) * 100.0 : 0.0;
+            coAttainment.put(cc, Math.round(pct * 10.0) / 10.0);
         }
+
+
+
 
         // ── Deduplicate: prefer full-code (ENCS101-CO1) over short-code (CO1) ─────
         // When both formats exist (legacy + new ingestion), remove the short form.
@@ -260,8 +267,30 @@ public class AttainmentService {
         }));
         Map<String, Double> result2 = new LinkedHashMap<>();
         for (Map.Entry<String, Double> e : sorted) result2.put(e.getKey(), e.getValue());
+
+        // ── Phantom CO filter ─────────────────────────────────────────────────
+        // When the cross-instance QCO fallback is used, the borrowed mappings may
+        // reference COs that belong to a different course instance (e.g., UIUX 2023
+        // ENMA101 has CO6-CO9; BTech 2023 CSE ENMA101 has only CO1-CO5).
+        // Filter the result to only include COs explicitly defined for THIS course.
+        List<CO> definedCOs = coRepository.findByCourseId(courseId);
+        if (!definedCOs.isEmpty()) {
+            Set<String> validCOCodes = new HashSet<>();
+            for (CO co : definedCOs) {
+                if (co.getCode() != null) validCOCodes.add(co.getCode().toUpperCase());
+                // Also add suffix-normalized form (e.g., "CO1" → accept "ENMA101-CO1")
+                String suffix = extractCOSuffix(co.getCode() != null ? co.getCode() : "");
+                if (!suffix.isEmpty()) validCOCodes.add(suffix.toUpperCase());
+            }
+            result2.entrySet().removeIf(e -> {
+                String code = e.getKey().toUpperCase();
+                String suffix = extractCOSuffix(e.getKey()).toUpperCase();
+                return !validCOCodes.contains(code) && !validCOCodes.contains(suffix);
+            });
+        }
         return result2;
     }
+
 
     /**
      * Converts a CO passing-percentage (0-100) to a level (1, 2, or 3).
@@ -333,12 +362,15 @@ public class AttainmentService {
     }
 
     /**
-     * Returns true if the question label is an end-term alternative question
-     * (Q2a, Q2b, Q3a, Q3b, Q4a, Q4b, Q5a, Q5b — case-insensitive).
+     * Returns true when the question label is an end-term alternative question
+     * (Q2a, Q2b, Q3a, Q3b, Q4a, Q4b, Q5a, Q5b — or their parenthesis forms:
+     * Q2(a), Q2(b), Q3(a), Q3(b), Q4(a), Q4(b), Q5(a), Q5(b) — case-insensitive).
+     * Q1 sub-parts (Q1(a), Q1(b)...) are NOT alternatives — they are all attempted.
      */
     private boolean isEndTermAlternativeQuestion(String label) {
         if (label == null) return false;
-        return label.matches("(?i)Q[2-5][a-bA-B].*");
+        // Matches: Q2a, Q2b, Q2(a), Q2(b) — for Q-numbers 2 through 9
+        return label.matches("(?i)Q[2-9]\\s*[\\(\\[]?\\s*[a-b]\\s*[\\)\\]]?.*");
     }
 
     /**

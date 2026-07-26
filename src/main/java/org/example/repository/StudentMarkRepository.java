@@ -236,4 +236,30 @@ public interface StudentMarkRepository extends JpaRepository<StudentMark, Long> 
             @Param("course") Course course,
             @Param("program") org.example.entity.Program program,
             @Param("yearPrefix") String yearPrefix);
+    /**
+     * Cross-instance fallback: finds marks for ANY course with the given code
+     * where the student belongs to the specified specialization.
+     * Used when ingestion stored marks under a different course instance
+     * (e.g. all ENCS301 marks under UI/UX course instead of CSE course).
+     */
+    @Query("SELECT sm FROM StudentMark sm " +
+           "JOIN FETCH sm.student st " +
+           "LEFT JOIN FETCH st.batch b " +
+           "LEFT JOIN FETCH b.specialization " +
+           "JOIN st.specialization sp " +
+           "WHERE sm.course.courseCode = :courseCode AND sp.id = :specId")
+    List<StudentMark> findByCourseCodeAndSpecId(
+            @Param("courseCode") String courseCode,
+            @Param("specId") Long specId);
+
+    /**
+     * Cross-instance fallback without spec filter — finds marks for ANY course
+     * with the given code (used when no specialization is selected).
+     */
+    @Query("SELECT sm FROM StudentMark sm " +
+           "JOIN FETCH sm.student st " +
+           "LEFT JOIN FETCH st.batch b " +
+           "LEFT JOIN FETCH b.specialization " +
+           "WHERE sm.course.courseCode = :courseCode")
+    List<StudentMark> findByCourseCode(@Param("courseCode") String courseCode);
 }

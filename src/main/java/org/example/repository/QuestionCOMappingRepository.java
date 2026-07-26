@@ -14,5 +14,13 @@ public interface QuestionCOMappingRepository extends JpaRepository<QuestionCOMap
     List<QuestionCOMapping> findByCourse(Course course);
 
     Optional<QuestionCOMapping> findByCourseAndQuestionLabel(Course course, String questionLabel);
+
+    @org.springframework.data.jpa.repository.Query(
+        "SELECT qcm FROM QuestionCOMapping qcm " +
+        "JOIN FETCH qcm.co co " +
+        "WHERE qcm.course.courseCode = :courseCode " +
+        "ORDER BY qcm.course.id ASC")
+    List<QuestionCOMapping> findByCourseCode(@org.springframework.data.repository.query.Param("courseCode") String courseCode);
 }
+
 

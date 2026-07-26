@@ -126,18 +126,106 @@ public class ZipIngestionService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    //  SINGLE EXCEL ENTRY — upload one question-wise marks report directly
+    //  (same logic as ZIP ingestion but for a single .xlsx file)
+    //
+    //  ✅ LOCAL  : hits localhost:8080
+    //  🚀 PROD   : no change needed
+    //
+    //  Exam type is inferred from the uploaded filename:
+    //    "(mid term)" or "mid_term" in the name  → mid_term
+    //    "(end term)" or "end_term" in the name  → end_term
+    // ─────────────────────────────────────────────────────────────────────────
+    public Map<String, Object> ingestSingleExcel(MultipartFile file) throws Exception {
+        String filename = file.getOriginalFilename();
+        if (filename == null || filename.isBlank()) filename = "upload.xlsx";
+
+        System.out.println("[SingleExcel] Processing file: " + filename);
+
+        Map<String, Object> fileResult;
+        try (InputStream is = file.getInputStream()) {
+            fileResult = processExcelFileV2(is, filename);
+        }
+
+        int records   = (Integer) fileResult.getOrDefault("records", 0);
+        Long courseId = (Long)    fileResult.get("courseId");
+        String courseKey = (String) fileResult.get("courseKey");
+
+        // Recalculate attainment for the affected course
+        Map<String, Object> attainmentResult = new LinkedHashMap<>();
+        if (courseId != null) {
+            try {
+                attainmentResult = attainmentService.getAttainmentReport(courseId);
+            } catch (Exception e) {
+                System.err.println("[SingleExcel] Attainment calc failed: " + e.getMessage());
+            }
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("status",              "SUCCESS");
+        result.put("message",             "Single mark sheet processed successfully");
+        result.put("file",                filename);
+        result.put("course",              courseKey != null ? courseKey : "(unknown)");
+        result.put("mark_records_saved",  records);
+        if (!attainmentResult.isEmpty()) result.put("attainment_summary", attainmentResult);
+        return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     //  PROCESS ONE EXCEL FILE - Returns course ID and key for attainment calculation
     // ─────────────────────────────────────────────────────────────────────────
+
     private Map<String, Object> processExcelFile(InputStream is, String filename) throws Exception {
         try (Workbook wb = new XSSFWorkbook(is)) {
 
+            // ── Auto-detect the marks sheet ───────────────────────────────────
+            // Try "EntrySheet" first (standard format), then scan all sheets for
+            // one whose header contains a student-ID column (marks entry reports).
             Sheet sheet = wb.getSheet("EntrySheet");
-            if (sheet == null) throw new IllegalStateException("Sheet 'EntrySheet' not found");
+
+            if (sheet == null) {
+                // Scan all sheets — look for marks-report columns in header row
+                for (int si = 0; si < wb.getNumberOfSheets(); si++) {
+                    Sheet candidate = wb.getSheetAt(si);
+                    Row hdr = candidate.getRow(0);
+                    if (hdr == null) continue;
+                    for (int ci = 0; ci < Math.min(hdr.getLastCellNum(), 30); ci++) {
+                        String h = hdr.getCell(ci) != null
+                                   ? hdr.getCell(ci).toString().trim().toLowerCase() : "";
+                        // "Student Id", "STUDENT_ID_T", "Student Name" are unique to marks sheets
+                        if (h.contains("student id") || h.contains("student_id")
+                                || h.contains("student name")) {
+                            sheet = candidate;
+                            System.out.println("[ZipIngestion] Using sheet '"
+                                               + wb.getSheetName(si) + "' (auto-detected)");
+                            break;
+                        }
+                    }
+                    if (sheet != null) break;
+                }
+            }
+
+            // Last resort: first sheet
+            if (sheet == null && wb.getNumberOfSheets() > 0) {
+                sheet = wb.getSheetAt(0);
+                System.out.println("[ZipIngestion] ⚠ No marks sheet detected in '"
+                                   + filename + "', falling back to first sheet '"
+                                   + wb.getSheetName(0) + "'");
+            }
+
+            if (sheet == null) throw new IllegalStateException(
+                "No sheets found in file: " + filename);
 
             Row headerRow = sheet.getRow(0);
             if (headerRow == null) throw new IllegalStateException("Header row missing");
 
-            String examType = filename.contains("end_term") ? "end_term" : "mid_term";
+            // Detect exam type from filename — handles both:
+            //   "end_term" (underscore format from old ZIP files)
+            //   "(end term)" / "(End Term)" (space format from SOET folder files)
+            String filenameLower = filename.toLowerCase();
+            String examType = (filenameLower.contains("end_term") || filenameLower.contains("end term"))
+                              ? "end_term" : "mid_term";
+
 
             // ── Parse question columns ────────────────────────────────────────
             // Skip: _ID, MARKS_ID, MAX_MARKS, QUESTION_MARKS_SUM

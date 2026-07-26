@@ -1,20 +1,27 @@
-// ═══ CONFIG ═══════════════════════════════════════════════════
-// Auto-detect server:
-//   port 8080  → Spring Boot is serving the page → use relative URL
-//   port 5500  → VS Code Live Server → point directly to Spring Boot at :8080
-//   other host → Production (Render)
-const API = (function() {
-    const h = window.location.hostname;
-    const p = window.location.port;
-    if (h === 'localhost' || h === '127.0.0.1') {
-        return p === '8080' ? '' : 'http://localhost:8080';
-    }
-    return 'https://obe-backend-qf77.onrender.com';
-})();
+// ═══════════════════════════════════════════════════════════════
+// ENV SWITCH  — only change the ONE line marked below
+// ───────────────────────────────────────────────────────────────
+//  ✅ LOCAL  : LOCAL_MODE = true   → hits http://localhost:8080
+//  🚀 PROD   : LOCAL_MODE = false  → hits Render backend URL
+// ───────────────────────────────────────────────────────────────
+
+const LOCAL_MODE = true; // ← ✅ CHANGE THIS: true = local, false = production
+
+// ── 🚀 PRODUCTION URL — only used when LOCAL_MODE = false ──────
+const PROD_URL = 'https://obe-backend-qf77.onrender.com';
+// ── END PROD URL ───────────────────────────────────────────────
+
+// Resolves to '' (relative) when on port 8080, or full localhost URL
+// when using VS Code Live Server on port 5500
+const API = LOCAL_MODE
+    ? (window.location.port === '8080' ? '' : 'http://localhost:8080')
+    : PROD_URL;
+
+// ═══════════════════════════════════════════════════════════════
 
 // ═══ STATE ════════════════════════════════════════════════════
 const S = { programId: null, batchYear: null, specId: null, semesterId: null, courseFilter: null, data: null };
-let barChart = null, pieChart = null, selectedZip = null, selectedPdf = null, selectedStruct = null, currentTab = 'dashboard';
+let barChart = null, pieChart = null, selectedZip = null, selectedPdf = null, selectedStruct = null, selectedCmapFile = null, currentTab = 'dashboard';
 
 // ═══ HELPERS ══════════════════════════════════════════════════
 async function get(path) {
@@ -30,11 +37,11 @@ function levelClr(lv) { return lv >= 3 ? 'var(--success)' : lv >= 2 ? 'var(--war
 function levelBadge(lv) { return '<span style="display:inline-flex;align-items:center;justify-content:center;min-width:52px;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:700;background:' + (lv >= 3 ? '#f0fdf4' : lv >= 2 ? '#fffbeb' : lv >= 1 ? '#fff7ed' : '#fef2f2') + ';color:' + levelClr(lv) + ';border:1px solid ' + (lv >= 3 ? '#bbf7d0' : lv >= 2 ? '#fde68a' : lv >= 1 ? '#fed7aa' : '#fecaca') + '">Level ' + lv + '</span>'; }
 
 // ═══ TAB ══════════════════════════════════════════════════════
-function switchTab(name, btn) {
+async function switchTab(name, btn) {
     currentTab = name;
-    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+    document.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
     if (btn) btn.classList.add('active');
-    ['dashboard', 'mapping', 'students', 'upload', 'admin', 'verify'].forEach(function(v) {
+    ['dashboard', 'mapping', 'students', 'upload', 'admin', 'verify'].forEach(function (v) {
         var el = document.getElementById('view-' + v);
         if (el) el.classList.add('hidden');
     });
@@ -59,8 +66,8 @@ function switchTab(name, btn) {
     }
     document.getElementById('empty-state').classList.add('hidden');
     document.getElementById('view-' + name).classList.remove('hidden');
-    // Mapping tab uses allCourses (includes courses without marks) so CO-PO data is always shown
-    if (name === 'mapping' && S.data) renderMapping(S.data.allCourses || S.data.courses || []);
+    // Mapping tab: reload with includeEmpty=true so courses without marks are visible
+    if (name === 'mapping') { await loadDashboard(); return; }
 }
 
 // ═══ FILTERS ══════════════════════════════════════════════════
@@ -74,23 +81,19 @@ async function onProgChange() {
     try {
         const batches = await get('/dashboard/batches?programId=' + S.programId);
         const b = document.getElementById('sel_batch');
-        // Filter out virtual 2024+ batches — only show actual DB batch entries (2023 and earlier).
-        // Students who enrolled in 2024 still belong to the 2023 DB batch entity.
-        const displayBatches = batches.filter(function(x) { return parseInt(x.year) <= 2023; });
-        const finalBatches = displayBatches.length > 0 ? displayBatches : batches;
-        finalBatches.forEach(function(x) { b.add(new Option(x.label, x.year)); });
-        b.disabled = finalBatches.length === 0;
-        // Auto-select the most recent valid batch (first in list, server returns newest first)
-        if (finalBatches.length > 0) {
-            b.value = finalBatches[0].year;
-            S.batchYear = finalBatches[0].year;
+        batches.forEach(function (x) { b.add(new Option(x.label, x.year)); });
+        b.disabled = batches.length === 0;
+        // Auto-select the first batch
+        if (batches.length > 0) {
+            b.value = batches[0].year;
+            S.batchYear = batches[0].year;
         }
     } catch (e) { console.warn('batches', e); }
 
     try {
-        const specs = await get('/dashboard/specializations?programId=' + S.programId);
+        const specs = await get('/dashboard/specializations?programId=' + S.programId + (S.batchYear ? '&batchYear=' + S.batchYear : ''));
         const s = document.getElementById('sel_spec');
-        specs.forEach(function(x) { s.add(new Option(x.name, x.id)); });
+        specs.forEach(function (x) { s.add(new Option(x.name, x.id)); });
         s.disabled = specs.length === 0;
         if (specs.length === 0) await loadSems();
     } catch (e) { console.warn('specs', e); }
@@ -98,9 +101,19 @@ async function onProgChange() {
 
 async function onBatchChange() {
     S.batchYear = document.getElementById('sel_batch').value || null;
-    S.semesterId = null; S.courseFilter = null;
+    S.specId = null; S.semesterId = null; S.courseFilter = null;
+    rst('sel_spec', '-- Select Specialization --');
     rst('sel_sem', '-- Select Semester --'); rst('sel_course_filter', '-- All Courses --');
-    hideData(); await loadSems();
+    hideData();
+    // Reload specializations filtered to the newly selected batch year
+    try {
+        const specs = await get('/dashboard/specializations?programId=' + S.programId + (S.batchYear ? '&batchYear=' + S.batchYear : ''));
+        const s = document.getElementById('sel_spec');
+        s.innerHTML = '<option value="">-- Select Specialization --</option>';
+        specs.forEach(function (x) { s.add(new Option(x.name, x.id)); });
+        s.disabled = specs.length === 0;
+        if (specs.length === 0) await loadSems();
+    } catch (e) { console.warn('specs on batch change', e); await loadSems(); }
 }
 
 async function onSpecChange() {
@@ -119,7 +132,7 @@ async function loadSems() {
         const sems = await get(url);
         const s = document.getElementById('sel_sem');
         s.innerHTML = '<option value="">-- Select Semester --</option>';
-        sems.forEach(function(x) { s.add(new Option(x.label, x.id)); });
+        sems.forEach(function (x) { s.add(new Option(x.label, x.id)); });
         s.disabled = sems.length === 0;
     } catch (e) { console.warn('sems', e); }
 }
@@ -149,40 +162,44 @@ async function loadDashboard() {
         if (S.specId) coUrl += '&specializationId=' + S.specId;
         if (S.batchYear) coUrl += '&batchYear=' + S.batchYear;
         if (S.courseFilter) coUrl += '&courseCode=' + encodeURIComponent(S.courseFilter);
+        // Always fetch all courses including those without marks yet.
+        // Dashboard view filters to studentCount>0 internally; student performance
+        // dropdown needs all courses so UIUX/FSD/new batches show even before upload.
+        coUrl += '&includeEmpty=true';
         const courseList = await get(coUrl);
         const filtered = S.courseFilter
-            ? courseList.filter(function(c) { return c.code === S.courseFilter; })
+            ? courseList.filter(function (c) { return c.code === S.courseFilter; })
             : courseList;
         const totalAllCourses = filtered.length;
 
         // ── Step 2: fetch CO, PO, PSO attainment + CO levels + at-risk for each course
         // Pass specializationId so attainment is computed from spec-filtered students only
-        const attainments = await Promise.all(filtered.map(function(c) {
+        const attainments = await Promise.all(filtered.map(function (c) {
             const specParam = S.specId ? '?specializationId=' + S.specId : '';
             return Promise.all([
-                get('/api/attainment/co/' + c.id + specParam).catch(function() { return {}; }),
-                get('/api/attainment/po/' + c.id + specParam).catch(function() { return {}; }),
-                get('/api/attainment/pso/' + c.id + specParam).catch(function() { return {}; }),
-                get('/api/attainment/co-po-mapping/' + c.id).catch(function() { return []; }),
-                get('/api/attainment/co-pso-mapping/' + c.id).catch(function() { return []; }),
-                get('/api/attainment/co-levels/' + c.id + specParam).catch(function() { return {}; }),
-                get('/api/attainment/at-risk/' + c.id + specParam).catch(function() { return { atRiskCount: 0 }; })
-            ]).then(function(results) {
+                get('/api/attainment/co/' + c.id + specParam).catch(function () { return {}; }),
+                get('/api/attainment/po/' + c.id + specParam).catch(function () { return {}; }),
+                get('/api/attainment/pso/' + c.id + specParam).catch(function () { return {}; }),
+                get('/api/attainment/co-po-mapping/' + c.id).catch(function () { return []; }),
+                get('/api/attainment/co-pso-mapping/' + c.id).catch(function () { return []; }),
+                get('/api/attainment/co-levels/' + c.id + specParam).catch(function () { return {}; }),
+                get('/api/attainment/at-risk/' + c.id + specParam).catch(function () { return { atRiskCount: 0 }; })
+            ]).then(function (results) {
                 return { co: results[0], po: results[1], pso: results[2], coPoMatrix: results[3], coPsoMatrix: results[4], coLevels: results[5], atRiskCount: results[6].atRiskCount || 0 };
-            }).catch(function() {
+            }).catch(function () {
                 return { co: {}, po: {}, pso: {}, coPoMatrix: [], coPsoMatrix: [], coLevels: {}, atRiskCount: 0 };
             });
         }));
 
         // ── Step 3: build unified data structure ─────────────────
-        let courses = filtered.map(function(c, idx) {
+        let courses = filtered.map(function (c, idx) {
             const coMap = attainments[idx].co || {};
             const poMap = attainments[idx].po || {};
             const psoMap = attainments[idx].pso || {};
             const coLevelMap = attainments[idx].coLevels || {};
             const target = 40.0;
 
-            const coAttainments = Object.entries(coMap).filter(function(e) { return e[1] > 0; }).map(function(e) {
+            const coAttainments = Object.entries(coMap).filter(function (e) { return e[1] > 0; }).map(function (e) {
                 return {
                     co: e[0],
                     description: e[0],
@@ -190,36 +207,66 @@ async function loadDashboard() {
                     level: coLevelMap[e[0]] != null ? coLevelMap[e[0]] : null,
                     target: target
                 };
-            }).sort(function(a, b) {
+            }).sort(function (a, b) {
                 var na = parseInt((a.co.match(/\d+$/) || [0])[0], 10);
                 var nb = parseInt((b.co.match(/\d+$/) || [0])[0], 10);
                 return na - nb;
             });
             const avg = coAttainments.length
-                ? Math.round(coAttainments.reduce(function(s, co) { return s + co.attainment; }, 0) / coAttainments.length * 10) / 10
+                ? Math.round(coAttainments.reduce(function (s, co) { return s + co.attainment; }, 0) / coAttainments.length * 10) / 10
                 : 0;
 
             // PO attainment: backend returns 0-3 decimal, keep as-is
-            const poHeaders = Object.keys(poMap).sort(function(a, b) {
+            let poHeaders = Object.keys(poMap).sort(function (a, b) {
                 var na = parseInt((a.match(/\d+$/) || [0])[0], 10);
                 var nb = parseInt((b.match(/\d+$/) || [0])[0], 10);
                 return na - nb;
             });
             const poAttainment = {};
-            poHeaders.forEach(function(po) {
+            poHeaders.forEach(function (po) {
                 poAttainment[po] = Math.round(poMap[po] * 100) / 100;
             });
+            // ── MAPPING TAB FALLBACK ──────────────────────────────────────────
+            // When there are no student marks (0 students), poMap is empty so
+            // poHeaders = []. Derive PO column headers directly from the
+            // coPoMatrix rows instead so the mapping table always renders.
+            if (poHeaders.length === 0 && attainments[idx].coPoMatrix && attainments[idx].coPoMatrix.length > 0) {
+                var poSet = {};
+                attainments[idx].coPoMatrix.forEach(function (row) {
+                    Object.keys(row).forEach(function (k) { if (k !== 'co') poSet[k] = true; });
+                });
+                poHeaders = Object.keys(poSet).sort(function (a, b) {
+                    var na = parseInt((a.match(/\d+$/) || [0])[0], 10);
+                    var nb = parseInt((b.match(/\d+$/) || [0])[0], 10);
+                    return na - nb;
+                });
+            }
+            // ── END MAPPING TAB FALLBACK ──────────────────────────────────────
 
             // PSO attainment: backend returns 0-3 decimal, keep as-is
-            const psoHeaders = Object.keys(psoMap).sort(function(a, b) {
+            let psoHeaders = Object.keys(psoMap).sort(function (a, b) {
                 var na = parseInt((a.match(/\d+$/) || [0])[0], 10);
                 var nb = parseInt((b.match(/\d+$/) || [0])[0], 10);
                 return na - nb;
             });
             const psoAttainment = {};
-            psoHeaders.forEach(function(pso) {
+            psoHeaders.forEach(function (pso) {
                 psoAttainment[pso] = Math.round(psoMap[pso] * 100) / 100;
             });
+            // ── MAPPING TAB FALLBACK ──────────────────────────────────────────
+            // Same fallback for PSO headers when no marks exist yet.
+            if (psoHeaders.length === 0 && attainments[idx].coPsoMatrix && attainments[idx].coPsoMatrix.length > 0) {
+                var psoSet = {};
+                attainments[idx].coPsoMatrix.forEach(function (row) {
+                    Object.keys(row).forEach(function (k) { if (k !== 'co') psoSet[k] = true; });
+                });
+                psoHeaders = Object.keys(psoSet).sort(function (a, b) {
+                    var na = parseInt((a.match(/\d+$/) || [0])[0], 10);
+                    var nb = parseInt((b.match(/\d+$/) || [0])[0], 10);
+                    return na - nb;
+                });
+            }
+            // ── END MAPPING TAB FALLBACK ──────────────────────────────────────
 
             return {
                 id: c.id, courseCode: c.code, courseName: c.name,
@@ -239,40 +286,40 @@ async function loadDashboard() {
 
         // dashboardCourses: only courses that have student marks — used for the
         // performance cards, KPI tiles, and Student Performance tab.
-        const dashboardCourses = courses.filter(function(c) { return c.studentCount > 0; });
+        const dashboardCourses = courses.filter(function (c) { return c.studentCount > 0; });
 
         const overallAtt = dashboardCourses.length
-            ? Math.round(dashboardCourses.filter(function(c) { return c.avgAttainment > 0; })
-                .reduce(function(s, c) { return s + c.avgAttainment; }, 0)
-                / Math.max(1, dashboardCourses.filter(function(c) { return c.avgAttainment > 0; }).length) * 10) / 10
+            ? Math.round(dashboardCourses.filter(function (c) { return c.avgAttainment > 0; })
+                .reduce(function (s, c) { return s + c.avgAttainment; }, 0)
+                / Math.max(1, dashboardCourses.filter(function (c) { return c.avgAttainment > 0; }).length) * 10) / 10
             : 0;
 
         // Collect PO/PSO attainments across courses with marks only
         const branchPoAtt = {}, branchPsoAtt = {};
-        dashboardCourses.forEach(function(course) {
-            Object.entries(course.poAttainment).forEach(function(e) {
+        dashboardCourses.forEach(function (course) {
+            Object.entries(course.poAttainment).forEach(function (e) {
                 if (!branchPoAtt[e[0]]) branchPoAtt[e[0]] = [];
                 branchPoAtt[e[0]].push(e[1]);
             });
-            Object.entries(course.psoAttainment).forEach(function(e) {
+            Object.entries(course.psoAttainment).forEach(function (e) {
                 if (!branchPsoAtt[e[0]]) branchPsoAtt[e[0]] = [];
                 branchPsoAtt[e[0]].push(e[1]);
             });
         });
 
         const branchPoAttainment = {}, branchPsoAttainment = {};
-        Object.entries(branchPoAtt).forEach(function(e) {
-            branchPoAttainment[e[0]] = Math.round(e[1].reduce(function(a,b) { return a+b; }, 0) / e[1].length * 10) / 10;
+        Object.entries(branchPoAtt).forEach(function (e) {
+            branchPoAttainment[e[0]] = Math.round(e[1].reduce(function (a, b) { return a + b; }, 0) / e[1].length * 10) / 10;
         });
-        Object.entries(branchPsoAtt).forEach(function(e) {
-            branchPsoAttainment[e[0]] = Math.round(e[1].reduce(function(a,b) { return a+b; }, 0) / e[1].length * 10) / 10;
+        Object.entries(branchPsoAtt).forEach(function (e) {
+            branchPsoAttainment[e[0]] = Math.round(e[1].reduce(function (a, b) { return a + b; }, 0) / e[1].length * 10) / 10;
         });
 
         // "Students Evaluated" = max across courses (students appear in multiple courses — don't sum)
-        const totalStudents = dashboardCourses.reduce(function(max, c) { return Math.max(max, c.studentCount); }, 0);
-        const totalAtRisk = dashboardCourses.reduce(function(max, c) { return Math.max(max, c.atRiskCount); }, 0);
+        const totalStudents = dashboardCourses.reduce(function (max, c) { return Math.max(max, c.studentCount); }, 0);
+        const totalAtRisk = dashboardCourses.reduce(function (max, c) { return Math.max(max, c.atRiskCount); }, 0);
 
-        const coursesWithMarksCount = dashboardCourses.filter(function(c) { return c.coAttainments.length > 0; }).length;
+        const coursesWithMarksCount = dashboardCourses.filter(function (c) { return c.coAttainments.length > 0; }).length;
 
         const d = {
             // courses: used for dashboard cards + Student Performance tab (marks only)
@@ -298,7 +345,7 @@ async function loadDashboard() {
 }
 
 // ═══ RENDER DASHBOARD ═════════════════════════════════════════
-const COURSE_PALETTE = ['#3b5bdb','#12b886','#f59f00','#7c3aed','#e64747','#0369a1','#d97706','#0891b2'];
+const COURSE_PALETTE = ['#3b5bdb', '#12b886', '#f59f00', '#7c3aed', '#e64747', '#0369a1', '#d97706', '#0891b2'];
 
 function renderDashboard(d) {
     const courses = d.courses || [];
@@ -309,9 +356,9 @@ function renderDashboard(d) {
     // Count at-risk COs (Level 1 with attainment < 40%)
     const allCOsFlat = [];
     const courseColorMap = {};
-    courses.forEach(function(c, ci) {
+    courses.forEach(function (c, ci) {
         courseColorMap[c.courseCode] = COURSE_PALETTE[ci % COURSE_PALETTE.length];
-        (c.coAttainments || []).forEach(function(co) {
+        (c.coAttainments || []).forEach(function (co) {
             allCOsFlat.push(Object.assign({}, co, { course: c.courseCode, courseName: c.courseName, courseIdx: ci }));
         });
     });
@@ -324,15 +371,15 @@ function renderDashboard(d) {
     if (barWrap) barWrap.innerHTML = ''; // always clear stale content
 
     if (allCOsFlat.length) {
-        const barColors = allCOsFlat.map(function(c) { return courseColorMap[c.course] || '#3b5bdb'; });
+        const barColors = allCOsFlat.map(function (c) { return courseColorMap[c.course] || '#3b5bdb'; });
         barChart = new Chart(document.getElementById('barChart'), {
             type: 'bar',
             data: {
-                labels: allCOsFlat.map(function(c) { return c.co; }),
+                labels: allCOsFlat.map(function (c) { return c.co; }),
                 datasets: [
                     {
                         label: 'Attainment %',
-                        data: allCOsFlat.map(function(c) { return c.attainment; }),
+                        data: allCOsFlat.map(function (c) { return c.attainment; }),
                         backgroundColor: barColors,
                         borderRadius: 4, categoryPercentage: 0.7, barPercentage: 0.8, order: 2
                     },
@@ -351,11 +398,11 @@ function renderDashboard(d) {
                     legend: { display: false },
                     tooltip: {
                         callbacks: {
-                            title: function(items) {
+                            title: function (items) {
                                 var co = allCOsFlat[items[0].dataIndex];
                                 return co ? co.courseName + ' (' + co.course + ')' : '';
                             },
-                            label: function(item) {
+                            label: function (item) {
                                 if (item.datasetIndex === 1) return 'Target: 40%';
                                 var co = allCOsFlat[item.dataIndex];
                                 var lv = co && co.level != null ? ' — Level ' + co.level : '';
@@ -365,14 +412,14 @@ function renderDashboard(d) {
                     }
                 },
                 scales: {
-                    y: { max: 100, min: 0, ticks: { callback: function(v) { return v + '%'; }, font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.05)' } },
+                    y: { max: 100, min: 0, ticks: { callback: function (v) { return v + '%'; }, font: { size: 10 } }, grid: { color: 'rgba(0,0,0,0.05)' } },
                     x: { ticks: { font: { size: 10 }, maxRotation: 45 }, grid: { display: false } }
                 }
             }
         });
 
         // Build course color legend below chart
-        var legend = courses.filter(function(c) { return c.coAttainments && c.coAttainments.length > 0; }).map(function(c) {
+        var legend = courses.filter(function (c) { return c.coAttainments && c.coAttainments.length > 0; }).map(function (c) {
             return '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-size:11px;font-weight:500;color:var(--text-2)">' +
                 '<span style="width:10px;height:10px;border-radius:2px;background:' + courseColorMap[c.courseCode] + ';display:inline-block;flex-shrink:0"></span>' +
                 '<span class="course-code" style="font-size:9px;padding:1px 5px">' + c.courseCode + '</span>' + c.courseName +
@@ -387,26 +434,26 @@ function renderDashboard(d) {
     var tableWrap = document.getElementById('attainment-table-wrap');
     if (tableWrap && courses.length > 0) {
         var allPoHdrs = [], allPsoHdrs = [];
-        courses.forEach(function(c) {
-            (c.poHeaders || []).forEach(function(p) { if (allPoHdrs.indexOf(p) < 0) allPoHdrs.push(p); });
-            (c.psoHeaders || []).forEach(function(p) { if (allPsoHdrs.indexOf(p) < 0) allPsoHdrs.push(p); });
+        courses.forEach(function (c) {
+            (c.poHeaders || []).forEach(function (p) { if (allPoHdrs.indexOf(p) < 0) allPoHdrs.push(p); });
+            (c.psoHeaders || []).forEach(function (p) { if (allPsoHdrs.indexOf(p) < 0) allPsoHdrs.push(p); });
         });
-        allPoHdrs.sort(function(a,b){ return parseInt((a.match(/\d+$/)||[0])[0],10)-parseInt((b.match(/\d+$/)||[0])[0],10); });
-        allPsoHdrs.sort(function(a,b){ return parseInt((a.match(/\d+$/)||[0])[0],10)-parseInt((b.match(/\d+$/)||[0])[0],10); });
+        allPoHdrs.sort(function (a, b) { return parseInt((a.match(/\d+$/) || [0])[0], 10) - parseInt((b.match(/\d+$/) || [0])[0], 10); });
+        allPsoHdrs.sort(function (a, b) { return parseInt((a.match(/\d+$/) || [0])[0], 10) - parseInt((b.match(/\d+$/) || [0])[0], 10); });
         var hasPo = allPoHdrs.length > 0, hasPso = allPsoHdrs.length > 0;
-        var tRows = courses.filter(function(c) { return c.coAttainments && c.coAttainments.length > 0; }).map(function(c) {
-            var poTds = allPoHdrs.map(function(p) {
+        var tRows = courses.filter(function (c) { return c.coAttainments && c.coAttainments.length > 0; }).map(function (c) {
+            var poTds = allPoHdrs.map(function (p) {
                 // Show '–' if this PO is not in the attainment map (course has no CO mapped to it)
                 var mapped = c.poAttainment && Object.prototype.hasOwnProperty.call(c.poAttainment, p);
                 if (!mapped) return '<td style="text-align:center;color:var(--text-3);font-size:11px">–</td>';
                 var v = c.poAttainment[p];
-                return '<td style="text-align:center;color:' + clr(v/3*100) + ';font-weight:600;font-size:11px">' + v + '</td>';
+                return '<td style="text-align:center;color:' + clr(v / 3 * 100) + ';font-weight:600;font-size:11px">' + v + '</td>';
             }).join('');
-            var psoTds = allPsoHdrs.map(function(p) {
+            var psoTds = allPsoHdrs.map(function (p) {
                 var mapped = c.psoAttainment && Object.prototype.hasOwnProperty.call(c.psoAttainment, p);
                 if (!mapped) return '<td style="text-align:center;color:var(--text-3);font-size:11px">–</td>';
                 var v = c.psoAttainment[p];
-                return '<td style="text-align:center;color:' + clr(v/3*100) + ';font-weight:600;font-size:11px">' + v + '</td>';
+                return '<td style="text-align:center;color:' + clr(v / 3 * 100) + ';font-weight:600;font-size:11px">' + v + '</td>';
             }).join('');
             return '<tr>' +
                 '<td><span class="course-code" style="background:' + courseColorMap[c.courseCode] + '22;color:' + courseColorMap[c.courseCode] + ';font-size:10px">' + c.courseCode + '</span></td>' +
@@ -422,16 +469,16 @@ function renderDashboard(d) {
                 '<th style="text-align:left;padding:5px 8px;background:var(--bg);font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text-3);white-space:nowrap">Code</th>' +
                 '<th style="text-align:left;padding:5px 8px;background:var(--bg);font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text-3)">Course Name</th>' +
                 '<th style="text-align:center;padding:5px 8px;background:var(--bg);font-size:10px;font-weight:600;text-transform:uppercase;color:var(--text-3)">Students</th>' +
-                (hasPo ? allPoHdrs.map(function(p) { return '<th style="text-align:center;padding:5px 8px;background:#eff6ff;font-size:10px;font-weight:600;color:#3b5bdb">' + p + '</th>'; }).join('') : '') +
-                (hasPso ? allPsoHdrs.map(function(p) { return '<th style="text-align:center;padding:5px 8px;background:#f5f3ff;font-size:10px;font-weight:600;color:#7c3aed">' + p + '</th>'; }).join('') : '') +
+                (hasPo ? allPoHdrs.map(function (p) { return '<th style="text-align:center;padding:5px 8px;background:#eff6ff;font-size:10px;font-weight:600;color:#3b5bdb">' + p + '</th>'; }).join('') : '') +
+                (hasPso ? allPsoHdrs.map(function (p) { return '<th style="text-align:center;padding:5px 8px;background:#f5f3ff;font-size:10px;font-weight:600;color:#7c3aed">' + p + '</th>'; }).join('') : '') +
                 '</tr></thead><tbody>' + tRows + '</tbody></table></div></div>';
         }
     }
 
     // ── Pie chart: categorize by CO Level (1, 2, 3) ───────────────
     var coLevelCounts = [0, 0, 0]; // [Level1, Level2, Level3]
-    courses.forEach(function(c) {
-        Object.values(c.coLevels || {}).forEach(function(lv) {
+    courses.forEach(function (c) {
+        Object.values(c.coLevels || {}).forEach(function (lv) {
             if (lv >= 3) coLevelCounts[2]++;
             else if (lv === 2) coLevelCounts[1]++;
             else coLevelCounts[0]++; // Level 1 (minimum, includes < 40%)
@@ -456,9 +503,9 @@ function renderDashboard(d) {
         list.innerHTML = '<div style="text-align:center;padding:48px;color:var(--text-3)"><i class="fas fa-inbox" style="font-size:32px;opacity:.3;display:block;margin-bottom:12px"></i>No courses with marks found for the selected filters.</div>';
         return;
     }
-    list.innerHTML = courses.map(function(c, i) {
+    list.innerHTML = courses.map(function (c, i) {
         const avg = c.avgAttainment != null ? c.avgAttainment : 0;
-        const coRows = (c.coAttainments || []).map(function(co, j) {
+        const coRows = (c.coAttainments || []).map(function (co, j) {
             const lv = (c.coLevels && c.coLevels[co.co] != null) ? c.coLevels[co.co] : (co.level != null ? co.level : null);
             const lvBadge = lv != null ? ' &nbsp;' + levelBadge(lv) : '';
             return '<div class="co-row" style="flex-direction:column; align-items:stretch; gap:4px;">' +
@@ -475,21 +522,21 @@ function renderDashboard(d) {
         const poHeaders = c.poHeaders || [];
         const poAtt = c.poAttainment || {};
         // Only show POs that are actually mapped (exist as keys in poAtt)
-        const mappedPoHeaders = poHeaders.filter(function(po) { return Object.prototype.hasOwnProperty.call(poAtt, po); });
+        const mappedPoHeaders = poHeaders.filter(function (po) { return Object.prototype.hasOwnProperty.call(poAtt, po); });
         const poRows = mappedPoHeaders.length > 0 ? '<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
             '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;">' +
-            mappedPoHeaders.map(function(po) {
+            mappedPoHeaders.map(function (po) {
                 const v = poAtt[po];
-                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + po + ':</strong><span style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</span></div>';
+                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + po + ':</strong><span style="color:' + clr(v / 3 * 100) + ';font-weight:600">' + v + '</span></div>';
             }).join('') + '</div></div>' : '';
         const psoHeaders = c.psoHeaders || [];
         const psoAtt = c.psoAttainment || {};
-        const mappedPsoHeaders = psoHeaders.filter(function(pso) { return Object.prototype.hasOwnProperty.call(psoAtt, pso); });
+        const mappedPsoHeaders = psoHeaders.filter(function (pso) { return Object.prototype.hasOwnProperty.call(psoAtt, pso); });
         const psoRows = mappedPsoHeaders.length > 0 ? '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;"><div style="font-size:11px;font-weight:600;color:var(--text-3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px;">PSO Attainment <span style="font-weight:400;font-size:10px">(0–3 scale)</span></div>' +
             '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:6px;">' +
-            mappedPsoHeaders.map(function(pso) {
+            mappedPsoHeaders.map(function (pso) {
                 const v = psoAtt[pso];
-                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + pso + ':</strong><span style="color:' + clr(v/3*100) + ';font-weight:600">' + v + '</span></div>';
+                return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;"><strong>' + pso + ':</strong><span style="color:' + clr(v / 3 * 100) + ';font-weight:600">' + v + '</span></div>';
             }).join('') + '</div></div>' : '';
         return '<div class="course-card">' +
             '<div class="course-header" onclick="tog(' + i + ')">' +
@@ -519,7 +566,7 @@ async function tog(i) {
         if (c && c.id && !c.examLoaded) {
             try {
                 const examData = await get('/api/attainment/co-by-exam-type/' + c.id);
-                (c.coAttainments || []).forEach(function(co, j) {
+                (c.coAttainments || []).forEach(function (co, j) {
                     const midPct = examData.mid_term ? Math.round((examData.mid_term[co.co] || 0)) : 0;
                     const endPct = examData.end_term ? Math.round((examData.end_term[co.co] || 0)) : 0;
                     const el = document.getElementById('co-extra-' + i + '-' + j);
@@ -538,7 +585,7 @@ async function tog(i) {
 function renderMapping(courses) {
     const el = document.getElementById('mapping-content');
     if (!courses.length) { el.innerHTML = '<div style="text-align:center;padding:48px;color:var(--text-3)">No mapping data available.</div>'; return; }
-    el.innerHTML = courses.map(function(c) {
+    el.innerHTML = courses.map(function (c) {
         const pos = c.poHeaders || [];
         const matrix = c.coPoMatrix || [];
         const poAtt = c.poAttainment || {};
@@ -548,39 +595,39 @@ function renderMapping(courses) {
 
         // Build a lookup for PSO weights by CO code from the separate psoMatrix
         var psoByCoCode = {};
-        (psoMatrix || []).forEach(function(r) { if (r.co) psoByCoCode[r.co] = r; });
+        (psoMatrix || []).forEach(function (r) { if (r.co) psoByCoCode[r.co] = r; });
 
         // Determine the list of COs to display — union of coPoMatrix and coPsoMatrix COs
         var coKeys = [];
         var coKeySet = {};
-        matrix.forEach(function(r) { if (r.co && !coKeySet[r.co]) { coKeys.push(r.co); coKeySet[r.co] = true; } });
-        (psoMatrix || []).forEach(function(r) { if (r.co && !coKeySet[r.co]) { coKeys.push(r.co); coKeySet[r.co] = true; } });
+        matrix.forEach(function (r) { if (r.co && !coKeySet[r.co]) { coKeys.push(r.co); coKeySet[r.co] = true; } });
+        (psoMatrix || []).forEach(function (r) { if (r.co && !coKeySet[r.co]) { coKeys.push(r.co); coKeySet[r.co] = true; } });
 
         // Build a lookup for PO weights by CO code
         var poByCoCode = {};
-        matrix.forEach(function(r) { if (r.co) poByCoCode[r.co] = r; });
+        matrix.forEach(function (r) { if (r.co) poByCoCode[r.co] = r; });
 
         // Combined header: CO | PO1 PO2 ... | PSO1 PSO2 ...
         var hasPo = pos.length > 0, hasPso = psos.length > 0;
-        var phdr = pos.map(function(p) { return '<th style="background:#eff6ff;color:#3b5bdb">' + p + '</th>'; }).join('');
-        var psoHdr = psos.map(function(p) { return '<th style="background:#f5f3ff;color:#7c3aed">' + p + '</th>'; }).join('');
+        var phdr = pos.map(function (p) { return '<th style="background:#eff6ff;color:#3b5bdb">' + p + '</th>'; }).join('');
+        var psoHdr = psos.map(function (p) { return '<th style="background:#f5f3ff;color:#7c3aed">' + p + '</th>'; }).join('');
 
         // Combined rows: each CO gets one row with PO weights + PSO weights
-        var rows = coKeys.map(function(coCode) {
+        var rows = coKeys.map(function (coCode) {
             var poRow = poByCoCode[coCode] || {};
             var psoRow = psoByCoCode[coCode] || {};
-            var poCells = pos.map(function(p) { var w = poRow[p] || 0; return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>'; }).join('');
-            var psoCells = psos.map(function(ps) { var w = psoRow[ps] || 0; return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>'; }).join('');
+            var poCells = pos.map(function (p) { var w = poRow[p] || 0; return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>'; }).join('');
+            var psoCells = psos.map(function (ps) { var w = psoRow[ps] || 0; return '<td><div class="score-pill s' + w + '">' + (w || '–') + '</div></td>'; }).join('');
             return '<tr><td><strong>' + coCode + '</strong></td>' + poCells + psoCells + '</tr>';
         }).join('');
 
         // Attainment footer row
-        var prow = pos.map(function(p) {
+        var prow = pos.map(function (p) {
             var v = poAtt[p] != null ? poAtt[p] : 0;
             var pctV = v / 3 * 100;
             return '<td><strong style="color:' + clr(pctV) + '">' + v + '</strong></td>';
         }).join('');
-        var psoAttRow = psos.map(function(p) {
+        var psoAttRow = psos.map(function (p) {
             var v = psoAtt[p] != null ? psoAtt[p] : 0;
             var pctV = v / 3 * 100;
             return '<td><strong style="color:' + clr(pctV) + '">' + v + '</strong></td>';
@@ -611,7 +658,7 @@ function fillCourseDropdowns(courses, allCourses) {
     const fsel = document.getElementById('sel_course_filter');
     const prev = fsel.value;
     fsel.innerHTML = '<option value="">-- All Courses --</option>';
-    courses.forEach(function(c) { fsel.add(new Option(c.courseCode + ' – ' + c.courseName, c.courseCode)); });
+    courses.forEach(function (c) { fsel.add(new Option(c.courseCode + ' – ' + c.courseName, c.courseCode)); });
     if (prev) fsel.value = prev;
     fsel.disabled = courses.length === 0;
     // Student tab dropdown: use allCourses (includes BCS/MSC/MTech/BCA courses)
@@ -619,7 +666,7 @@ function fillCourseDropdowns(courses, allCourses) {
     const studentCourses = allCourses && allCourses.length > 0 ? allCourses : courses;
     const ssel = document.getElementById('sel_course');
     ssel.innerHTML = '<option value="">-- Select a Course --</option>';
-    studentCourses.forEach(function(c) { ssel.add(new Option(c.courseCode + ' – ' + c.courseName, c.id)); });
+    studentCourses.forEach(function (c) { ssel.add(new Option(c.courseCode + ' – ' + c.courseName, c.id)); });
 }
 
 // ═══ STUDENTS ═════════════════════════════════════════════════
@@ -640,9 +687,9 @@ async function loadStudents() {
         if (d.error) { el.innerHTML = '<div style="color:var(--danger);padding:16px">' + d.error + '</div>'; return; }
         const students = d.students || [], coCodes = d.coCodes || [];
         if (!students.length) { el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-3)"><i class="fas fa-user-slash" style="font-size:28px;opacity:.3;display:block;margin-bottom:12px"></i>No student data for this course.<br><small>Make sure marks Excel files are uploaded for this course.</small></div>'; return; }
-        const coHdrs = coCodes.map(function(c) { return '<th>' + c + '</th>'; }).join('');
-        const rows = students.map(function(s) {
-            const coTds = coCodes.map(function(c) { const v = s[c] != null ? s[c] : 0; return '<td class="co-pct-cell ' + (v < 40 ? 'low' : '') + '">' + v + '%</td>'; }).join('');
+        const coHdrs = coCodes.map(function (c) { return '<th>' + c + '</th>'; }).join('');
+        const rows = students.map(function (s) {
+            const coTds = coCodes.map(function (c) { const v = s[c] != null ? s[c] : 0; return '<td class="co-pct-cell ' + (v < 40 ? 'low' : '') + '">' + v + '%</td>'; }).join('');
             return '<tr><td style="font-family:var(--mono);font-size:12px">' + (s.enrollmentNo || '—') + '</td><td>' + (s.name || '—') + '</td>' + coTds + '</tr>';
         }).join('');
         el.innerHTML = '<div class="data-card"><div class="data-card-header"><div class="data-card-title"><i class="fas fa-users" style="color:var(--accent)"></i> ' + (d.courseCode || '') + ': ' + (d.courseName || '') + '</div><span style="font-size:12px;color:var(--text-3)">' + students.length + ' students</span></div><div class="table-wrap"><table><thead><tr><th>Enrollment</th><th>Name</th>' + coHdrs + '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
@@ -653,6 +700,7 @@ async function loadStudents() {
 function onZipSelect(e) { selectedZip = e.target.files[0]; document.getElementById('zipLabel').textContent = selectedZip ? selectedZip.name : 'Click to select ZIP'; document.getElementById('zipName').textContent = selectedZip ? selectedZip.name : ''; document.getElementById('zipBtn').disabled = !selectedZip; }
 function onPdfSelect(e) { selectedPdf = e.target.files[0]; document.getElementById('pdfLabel').textContent = selectedPdf ? selectedPdf.name : 'Click to select PDF'; document.getElementById('pdfName').textContent = selectedPdf ? selectedPdf.name : ''; document.getElementById('pdfBtn').disabled = !selectedPdf; }
 function onStructSelect(e) { selectedStruct = e.target.files[0]; document.getElementById('structLabel').textContent = selectedStruct ? selectedStruct.name : 'Click to select .xlsx'; document.getElementById('structName').textContent = selectedStruct ? selectedStruct.name : ''; document.getElementById('structBtn').disabled = !selectedStruct; }
+function onCmapSelect(e) { selectedCmapFile = e.target.files[0]; document.getElementById('cmapLabel').textContent = selectedCmapFile ? selectedCmapFile.name : 'Click or drag CO PO MAPPING SHEET Excel here'; document.getElementById('cmapName').textContent = selectedCmapFile ? selectedCmapFile.name : ''; document.getElementById('cmapBtn').disabled = !selectedCmapFile; }
 
 var selectedSpecFile = null;
 function onSpecFileSelect(e) {
@@ -671,7 +719,7 @@ async function uploadSpecialization() {
         var d = await r.json();
         if (d.error) { res.className = 'upload-result error'; res.innerHTML = d.error; return; }
         res.className = 'upload-result success';
-        var specLines = Object.entries(d.updated_by_specialization || {}).map(function(e) {
+        var specLines = Object.entries(d.updated_by_specialization || {}).map(function (e) {
             return '<br>&nbsp;&nbsp;• ' + e[0] + ': <strong>' + e[1] + '</strong> students';
         }).join('');
         res.innerHTML = '<strong>✓ Done!</strong><br>' +
@@ -690,7 +738,7 @@ async function checkSpecStatus() {
     res.className = 'upload-result'; res.innerHTML = 'Checking...'; res.style.display = 'block';
     try {
         var d = await get('/students/specialization-status');
-        var lines = (d.per_specialization || []).map(function(s) {
+        var lines = (d.per_specialization || []).map(function (s) {
             return '<br>&nbsp;&nbsp;• ' + (s.name || '?') + ' [' + (s.programme || '?') + ']: <strong>' + s.students + '</strong> students';
         }).join('');
         res.className = 'upload-result ' + (d.without_specialization > 0 ? 'error' : 'success');
@@ -708,7 +756,7 @@ async function autoFixSpecFromCode() {
         var r = await fetch(API + '/students/assign-spec-from-enrollment-code', { method: 'POST' });
         var d = await r.json();
         if (d.error) { res.className = 'upload-result error'; res.innerHTML = d.error; return; }
-        var specLines = Object.entries(d.by_specialization || {}).map(function(e) {
+        var specLines = Object.entries(d.by_specialization || {}).map(function (e) {
             return '<br>&nbsp;&nbsp;• ' + e[0] + ': <strong>' + e[1] + '</strong> students';
         }).join('');
         res.className = 'upload-result success';
@@ -743,6 +791,137 @@ async function uploadZip() {
     btn.innerHTML = '<i class="fas fa-upload"></i> Upload'; btn.disabled = false;
 }
 
+// ── ✅ LOCAL/🚀 PROD: Result Excel upload — hits /marks/upload-result-excel ──
+// Change LOCAL_MODE at the top of this file to switch environments.
+let selectedResultExcel = null;
+
+// ── Question-Wise Marks Report upload — /marks/upload-qwise-report ───────────
+// Use this for "Question wise marks entry report Odd sem.xlsx" (Sheet2 format)
+// Component "Class Test" Freq 1 → mid_term | "End Term" → end_term
+let selectedQwiseFile = null;
+
+function onQwiseSelect(e) {
+    selectedQwiseFile = e.target.files[0];
+    const label = document.getElementById('qwiseLabel');
+    const name  = document.getElementById('qwiseName');
+    const btn   = document.getElementById('qwiseBtn');
+    if (label) label.textContent = selectedQwiseFile ? selectedQwiseFile.name : 'Click or drag Question-Wise Report .xlsx here';
+    if (name)  name.textContent  = selectedQwiseFile ? selectedQwiseFile.name : '';
+    if (btn)   btn.disabled      = !selectedQwiseFile;
+}
+
+async function uploadQwiseReport() {
+    if (!selectedQwiseFile) return;
+    const btn = document.getElementById('qwiseBtn');
+    const res = document.getElementById('qwiseResult');
+    btn.innerHTML = '<span class="spin"></span> Uploading…'; btn.disabled = true;
+    res.className = 'upload-result';
+    res.innerHTML = '';
+    try {
+        const fd = new FormData();
+        fd.append('file', selectedQwiseFile);
+        const r = await fetch(API + '/marks/upload-qwise-report', { method: 'POST', body: fd });
+        if (!r.ok) { const t = await r.text(); throw new Error(t || r.statusText); }
+        const d = await r.json();
+        res.className = 'upload-result success';
+        res.innerHTML =
+            '<strong>' + (d.status || 'SUCCESS') + '</strong> — ' + d.message + '<br>' +
+            '📄 Sheet: <code>' + (d.sheet_processed || '—') + '</code><br>' +
+            '📖 Rows read: <strong>' + (d.rows_read || 0).toLocaleString() + '</strong>' +
+            ' &nbsp;|&nbsp; ⏭ Skipped: <strong>' + (d.rows_skipped || 0).toLocaleString() + '</strong>' +
+            ' &nbsp;|&nbsp; ♻ Duplicates: <strong>' + (d.duplicates_skipped || 0).toLocaleString() + '</strong><br>' +
+            '💾 Mark records saved: <strong>' + (d.mark_records_saved || 0).toLocaleString() + '</strong>' +
+            ' across <strong>' + (d.courses_processed || 0) + '</strong> courses<br>' +
+            '<small style="color:var(--text-2)">' + (d.note || '') + '</small>';
+    } catch (e) {
+        res.className = 'upload-result error';
+        res.innerHTML = '❌ ' + (e.message || 'Upload failed');
+    }
+    btn.innerHTML = '<i class="fas fa-upload"></i> Upload Report'; btn.disabled = false;
+}
+
+// ── Single Mark Sheet upload — /marks/upload-single-excel ───────────────────
+
+let selectedSingleExcel = null;
+
+function onSingleExcelSelect(e) {
+    selectedSingleExcel = e.target.files[0];
+    const label = document.getElementById('singleExcelLabel');
+    const name  = document.getElementById('singleExcelName');
+    const btn   = document.getElementById('singleExcelBtn');
+    if (label) label.textContent = selectedSingleExcel ? selectedSingleExcel.name : 'Click or drag mark sheet .xlsx here';
+    if (name)  name.textContent  = selectedSingleExcel ? selectedSingleExcel.name : '';
+    if (btn)   btn.disabled      = !selectedSingleExcel;
+}
+
+async function uploadSingleExcel() {
+    if (!selectedSingleExcel) return;
+    const btn = document.getElementById('singleExcelBtn');
+    const res = document.getElementById('singleExcelResult');
+    btn.innerHTML = '<span class="spin"></span> Uploading...'; btn.disabled = true;
+    res.className = 'upload-result';
+    try {
+        const fd = new FormData();
+        fd.append('file', selectedSingleExcel);
+        const r = await fetch(API + '/marks/upload-single-excel', { method: 'POST', body: fd });
+        if (!r.ok) { const t = await r.text(); throw new Error(t || r.statusText); }
+        const d = await r.json();
+        res.className = 'upload-result success';
+        res.innerHTML =
+            '<strong>' + (d.status || 'SUCCESS') + '</strong> — ' + d.message + '<br>' +
+            '📄 File: <strong>' + (d.file || selectedSingleExcel.name) + '</strong><br>' +
+            '📚 Course: <strong>' + (d.course || '—') + '</strong><br>' +
+            '💾 Mark records saved: <strong>' + (d.mark_records_saved || 0).toLocaleString() + '</strong>';
+    } catch (e) {
+        res.className = 'upload-result error';
+        res.innerHTML = '❌ ' + (e.message || 'Upload failed');
+    }
+    btn.innerHTML = '<i class="fas fa-upload"></i> Upload Mark Sheet'; btn.disabled = false;
+}
+
+// ── Result Excel upload — /marks/upload-result-excel ────────────────────────
+function onResultExcelSelect(e) {
+
+    selectedResultExcel = e.target.files[0];
+    const label = document.getElementById('resultExcelLabel');
+    const name  = document.getElementById('resultExcelName');
+    const btn   = document.getElementById('resultExcelBtn');
+    if (label) label.textContent = selectedResultExcel ? selectedResultExcel.name : 'Click or drag Result Excel .xlsx here';
+    if (name)  name.textContent  = selectedResultExcel ? selectedResultExcel.name : '';
+    if (btn)   btn.disabled      = !selectedResultExcel;
+}
+
+async function uploadResultExcel() {
+    if (!selectedResultExcel) return;
+    const btn = document.getElementById('resultExcelBtn');
+    const res = document.getElementById('resultExcelResult');
+    btn.innerHTML = '<span class="spin"></span> Uploading...'; btn.disabled = true;
+    res.className = 'upload-result';
+    try {
+        const fd = new FormData();
+        fd.append('file', selectedResultExcel);
+        const r = await fetch(API + '/marks/upload-result-excel', { method: 'POST', body: fd });
+        if (!r.ok) { const t = await r.text(); throw new Error(t || r.statusText); }
+        const d = await r.json();
+        res.className = 'upload-result success';
+        res.innerHTML =
+            '<strong>' + (d.status || 'SUCCESS') + '</strong> — ' + d.message + '<br>' +
+            '📥 Rows read: <strong>' + (d.rows_read || 0).toLocaleString() + '</strong> &nbsp;|&nbsp; ' +
+            '💾 Marks saved: <strong>' + (d.mark_records_saved || 0).toLocaleString() + '</strong> &nbsp;|&nbsp; ' +
+            '🔁 Duplicates skipped: <strong>' + (d.duplicates_skipped || 0).toLocaleString() + '</strong><br>' +
+            '🎓 Absent rows skipped: <strong>' + (d.rows_absent_skipped || 0).toLocaleString() + '</strong> &nbsp;|&nbsp; ' +
+            '📚 Courses processed: <strong>' + (d.courses_processed || 0) + '</strong><br>' +
+            '<small style="color:var(--text-2)">mid_term max: ' + (d.mid_term_max_marks || 20) +
+            ' &nbsp;|&nbsp; end_term max: ' + (d.end_term_max_marks || 50) + '</small>' +
+            (d.rows_no_course_skipped ? '<br><small style="color:var(--warn)">⚠ ' + d.rows_no_course_skipped + ' rows skipped (course not in DB)</small>' : '') +
+            (d.errors && d.errors.length ? '<br><small style="color:#dc2626">Errors: ' + d.errors.length + '</small>' : '');
+    } catch (e) {
+        res.className = 'upload-result error';
+        res.innerHTML = '❌ ' + (e.message || 'Upload failed');
+    }
+    btn.innerHTML = '<i class="fas fa-upload"></i> Upload Result Excel'; btn.disabled = false;
+}
+
 async function uploadPdf() {
     if (!selectedPdf) return;
     const btn = document.getElementById('pdfBtn'), res = document.getElementById('pdfResult');
@@ -757,6 +936,53 @@ async function uploadPdf() {
         res.innerHTML = '<strong>Parsed!</strong><br>' + d.program + ' · ' + (d.specialization || '—') + ' · Batch ' + d.batch + '<br>' + d.semesters_found + ' semesters · ' + d.courses_found + ' courses · ' + d.cos_found + ' COs · ' + d.pos_found + ' POs · ' + d.psos_found + ' PSOs<br>' + d.copo_mappings + ' CO-PO · ' + d.copso_mappings + ' CO-PSO mappings';
     } catch (e) { res.className = 'upload-result error'; res.innerHTML = e.message; }
     btn.innerHTML = '<i class="fas fa-cogs"></i> Parse Handbook'; btn.disabled = false;
+}
+
+/** Pre-fill CO-PO mapping form fields — called from Quick Fill buttons */
+function cmapQuickFill(prog, spec, startYear, endYear) {
+    const progEl  = document.getElementById('cmapProgram');
+    const specEl  = document.getElementById('cmapSpec');
+    const syEl    = document.getElementById('cmapStartYear');
+    const eyEl    = document.getElementById('cmapEndYear');
+    if (progEl)  progEl.value  = prog;
+    if (specEl)  specEl.value  = spec;
+    if (syEl)    syEl.value    = startYear;
+    if (eyEl)    eyEl.value    = endYear;
+    // Scroll the file picker into view so user can drag the file
+    const zone = document.getElementById('cmapZone');
+    if (zone) zone.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function uploadCoPoMap() {
+
+    if (!selectedCmapFile) return;
+    const btn = document.getElementById('cmapBtn'), res = document.getElementById('cmapResult');
+    const prog = document.getElementById('cmapProgram').value;
+    const spec = document.getElementById('cmapSpec').value;
+    const sYear = document.getElementById('cmapStartYear').value;
+    const eYear = document.getElementById('cmapEndYear').value;
+    if (!prog) { res.className = 'upload-result error'; res.innerHTML = 'Programme is required.'; return; }
+    if (!sYear) { res.className = 'upload-result error'; res.innerHTML = 'Batch Start Year is required.'; return; }
+    if (!eYear) { res.className = 'upload-result error'; res.innerHTML = 'Batch End Year is required.'; return; }
+    btn.innerHTML = '<span class="spin"></span> Uploading...'; btn.disabled = true; res.className = 'upload-result';
+    try {
+        const fd = new FormData();
+        fd.append('file', selectedCmapFile);
+        fd.append('programName', prog);
+        if (spec) fd.append('specializationName', spec);
+        fd.append('startYear', sYear);
+        fd.append('endYear', eYear);
+        const r = await fetch(API + '/copomap/upload', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (d.error || d.message) throw new Error(d.message || d.error);
+        res.className = 'upload-result success';
+        res.innerHTML = '<strong>✅ Done!</strong><br>' +
+            d.program + ' · ' + (d.specialization || '—') + ' · Batch ' + d.batch + '<br>' +
+            d.pos_upserted + ' POs · ' + d.psos_upserted + ' PSOs<br>' +
+            d.courses_created_or_found + ' courses · ' + d.cos_created + ' COs<br>' +
+            d.copo_mappings_upserted + ' CO-PO mappings · ' + d.copso_mappings_upserted + ' CO-PSO mappings';
+    } catch (e) { res.className = 'upload-result error'; res.innerHTML = 'Error: ' + e.message; }
+    btn.innerHTML = '<i class="fas fa-project-diagram"></i> Upload CO-PO Mapping'; btn.disabled = false;
 }
 
 async function uploadStruct() {
@@ -799,15 +1025,15 @@ async function loadVerify() {
     try {
         const d = await get('/dashboard/verify');
         const stats = d.stats || {};
-        const keys = ['programmes','specializations','batches','semesters','courses','cos','pos','psos','copo_mappings','copso_mappings','students','marks'];
+        const keys = ['programmes', 'specializations', 'batches', 'semesters', 'courses', 'cos', 'pos', 'psos', 'copo_mappings', 'copso_mappings', 'students', 'marks'];
         let html = '<div class="kpi-grid" style="grid-template-columns:repeat(6,1fr);margin-bottom:20px">';
-        keys.forEach(function(k) {
+        keys.forEach(function (k) {
             html += '<div class="kpi" style="flex-direction:column;align-items:flex-start;gap:4px"><div class="kpi-val" style="font-size:18px">' + (stats[k] || 0).toLocaleString() + '</div><div class="kpi-label">' + k.replace(/_/g, ' ') + '</div></div>';
         });
         html += '</div>';
         const courses = d.courses || [];
         html += '<div class="data-card" style="margin-bottom:14px"><div class="data-card-header"><div class="data-card-title">Courses</div><span style="font-size:12px;color:var(--text-3)">' + courses.length + ' total</span></div><div class="table-wrap"><table><thead><tr><th>Code</th><th>Name</th><th>Sem</th><th>COs</th><th>CO-PO</th><th>CO-PSO</th><th>Marks</th><th>Students</th></tr></thead><tbody>';
-        courses.forEach(function(c) {
+        courses.forEach(function (c) {
             html += '<tr><td><span class="course-code">' + c.courseCode + '</span></td><td style="font-size:12px">' + c.courseName + '</td><td>' + (c.semester || '—') + '</td>' +
                 '<td><span class="badge ' + (c.cos > 0 ? 'badge-green' : 'badge-red') + '">' + c.cos + '</span></td>' +
                 '<td><span class="badge ' + (c.copoMappings > 0 ? 'badge-green' : 'badge-yellow') + '">' + c.copoMappings + '</span></td>' +
@@ -818,11 +1044,11 @@ async function loadVerify() {
         const pos = d.pos || [], psos = d.psos || [];
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">';
         html += '<div class="data-card"><div class="data-card-header"><div class="data-card-title">Programme Outcomes (PO)</div></div><div class="table-wrap"><table><thead><tr><th>Code</th><th>Description</th></tr></thead><tbody>';
-        if (pos.length) pos.forEach(function(p) { html += '<tr><td><strong>' + p.code + '</strong></td><td style="font-size:12px">' + (p.description || '—') + '</td></tr>'; });
+        if (pos.length) pos.forEach(function (p) { html += '<tr><td><strong>' + p.code + '</strong></td><td style="font-size:12px">' + (p.description || '—') + '</td></tr>'; });
         else html += '<tr><td colspan="2" style="color:var(--text-3);text-align:center;padding:16px">No POs found</td></tr>';
         html += '</tbody></table></div></div>';
         html += '<div class="data-card"><div class="data-card-header"><div class="data-card-title">Programme Specific Outcomes (PSO)</div></div><div class="table-wrap"><table><thead><tr><th>Code</th><th>Description</th></tr></thead><tbody>';
-        if (psos.length) psos.forEach(function(p) { html += '<tr><td><strong>' + p.code + '</strong></td><td style="font-size:12px">' + (p.description || '—') + '</td></tr>'; });
+        if (psos.length) psos.forEach(function (p) { html += '<tr><td><strong>' + p.code + '</strong></td><td style="font-size:12px">' + (p.description || '—') + '</td></tr>'; });
         else html += '<tr><td colspan="2" style="color:var(--text-3);text-align:center;padding:16px">No PSOs found</td></tr>';
         html += '</tbody></table></div></div></div>';
         el.innerHTML = html;
@@ -832,16 +1058,16 @@ async function loadVerify() {
 function renderVerifyResult(d) {
     const el = document.getElementById('verify-content');
     const checks = d.checks || [];
-    const passed = checks.filter(function(c) { return c.status === 'OK'; }).length;
-    const failed = checks.filter(function(c) { return c.status === 'MISSING' || c.status === 'MISMATCH'; }).length;
-    const warn = checks.filter(function(c) { return c.status === 'WARN'; }).length;
+    const passed = checks.filter(function (c) { return c.status === 'OK'; }).length;
+    const failed = checks.filter(function (c) { return c.status === 'MISSING' || c.status === 'MISMATCH'; }).length;
+    const warn = checks.filter(function (c) { return c.status === 'WARN'; }).length;
     const statusColor = { OK: 'var(--success)', MISSING: 'var(--danger)', MISMATCH: 'var(--warn)', WARN: 'var(--warn)' };
     let html = '<div style="display:flex;gap:12px;margin-bottom:16px">' +
         '<div class="kpi" style="flex:1"><div class="kpi-icon green"><i class="fas fa-check"></i></div><div><div class="kpi-val">' + passed + '</div><div class="kpi-label">Passed</div></div></div>' +
         '<div class="kpi" style="flex:1"><div class="kpi-icon red"><i class="fas fa-times"></i></div><div><div class="kpi-val">' + failed + '</div><div class="kpi-label">Failed</div></div></div>' +
         '<div class="kpi" style="flex:1"><div class="kpi-icon orange"><i class="fas fa-exclamation"></i></div><div><div class="kpi-val">' + warn + '</div><div class="kpi-label">Warnings</div></div></div></div>';
     html += '<div class="data-card"><div class="data-card-header"><div class="data-card-title">Verification Results</div></div><div class="table-wrap"><table><thead><tr><th style="text-align:left">Check</th><th>Expected</th><th>In DB</th><th>Status</th></tr></thead><tbody>';
-    checks.forEach(function(c) {
+    checks.forEach(function (c) {
         html += '<tr><td><strong>' + c.label + '</strong></td><td style="font-family:var(--mono);font-size:12px">' + (c.expected || '—') + '</td><td style="font-family:var(--mono);font-size:12px">' + (c.actual || '—') + '</td><td style="color:' + (statusColor[c.status] || 'inherit') + ';font-weight:600">' + c.status + '</td></tr>';
     });
     html += '</tbody></table></div></div>';
@@ -850,7 +1076,7 @@ function renderVerifyResult(d) {
 
 // ═══ HIDE DATA ════════════════════════════════════════════════
 function hideData() {
-    ['dashboard', 'mapping', 'students', 'verify'].forEach(function(v) {
+    ['dashboard', 'mapping', 'students', 'verify'].forEach(function (v) {
         document.getElementById('view-' + v).classList.add('hidden');
     });
     document.getElementById('empty-state').classList.remove('hidden');
@@ -861,11 +1087,11 @@ function hideData() {
 }
 
 // ═══ INIT ═════════════════════════════════════════════════════
-(async function() {
+(async function () {
     try {
         const progs = await get('/dashboard/programs');
         const sel = document.getElementById('sel_prog');
-        progs.forEach(function(p) { sel.add(new Option(p.name, p.id)); });
+        progs.forEach(function (p) { sel.add(new Option(p.name, p.id)); });
         sel.disabled = progs.length === 0;
     } catch (e) { console.warn('programs', e); }
 })();
@@ -885,24 +1111,35 @@ async function adminApi(method, path, body) {
 }
 
 function adminSection(sec, btn) {
-    document.querySelectorAll('.admin-nav-btn').forEach(function(b) { b.classList.remove('active'); });
+    document.querySelectorAll('.admin-nav-btn').forEach(function (b) { b.classList.remove('active'); });
     if (btn) btn.classList.add('active');
     ADM.section = sec;
-    const map = { programs: loadAdminPrograms, batches: loadAdminBatches, semesters: loadAdminSemesters, courses: loadAdminCourses, cos: loadAdminCOs, pos: loadAdminPOs, psos: loadAdminPSOs, copo: loadAdminCoPo, copso: loadAdminCoPso };
+    const map = {
+        programs: loadAdminPrograms,
+        specializations: loadAdminSpecializations,
+        batches: loadAdminBatches,
+        semesters: loadAdminSemesters,
+        courses: loadAdminCourses,
+        cos: loadAdminCOs,
+        pos: loadAdminPOs,
+        psos: loadAdminPSOs,
+        copo: loadAdminCoPo,
+        copso: loadAdminCoPso
+    };
     if (map[sec]) map[sec]();
 }
 
 function ac(tag, props) {
     const el = document.createElement(tag);
     const children = Array.prototype.slice.call(arguments, 2);
-    Object.entries(props || {}).forEach(function(entry) {
+    Object.entries(props || {}).forEach(function (entry) {
         const k = entry[0], v = entry[1];
         if (k === 'style') Object.assign(el.style, v);
         else if (k === 'class') el.className = v;
         else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
         else el.setAttribute(k, v);
     });
-    children.forEach(function(c) { el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    children.forEach(function (c) { el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
     return el;
 }
 
@@ -912,31 +1149,31 @@ function adminWrap(title) {
     el.innerHTML = '';
     const card = ac('div', { class: 'data-card', style: { padding: '20px' } });
     card.appendChild(ac('h3', { style: { marginBottom: '16px', fontSize: '16px', color: 'var(--accent)' } }, title));
-    nodes.forEach(function(n) { card.appendChild(n); });
+    nodes.forEach(function (n) { card.appendChild(n); });
     el.appendChild(card);
 }
 
 function adminMsg(txt, ok) {
     if (ok === undefined) ok = true;
     const m = ac('div', { style: { padding: '8px 12px', borderRadius: '7px', fontSize: '12px', fontWeight: 600, marginTop: '10px', background: ok ? '#f0fdf4' : '#fef2f2', color: ok ? '#166534' : '#991b1b' } }, txt);
-    document.getElementById('admin-content').querySelectorAll('.admin-msg').forEach(function(x) { x.remove(); });
+    document.getElementById('admin-content').querySelectorAll('.admin-msg').forEach(function (x) { x.remove(); });
     m.className = 'admin-msg';
     const card = document.getElementById('admin-content').querySelector('.data-card');
     if (card) card.appendChild(m);
-    setTimeout(function() { m.remove(); }, 3000);
+    setTimeout(function () { m.remove(); }, 3000);
 }
 
 function entityTable(cols, rows, actions) {
     const tbl = ac('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' } });
     const thead = ac('thead'), hr = ac('tr');
-    cols.concat(['Actions']).forEach(function(c) { hr.appendChild(ac('th', { style: { textAlign: 'left', padding: '8px 10px', borderBottom: '2px solid var(--border)', color: 'var(--text-3)', fontSize: '11px', textTransform: 'uppercase' } }, c)); });
+    cols.concat(['Actions']).forEach(function (c) { hr.appendChild(ac('th', { style: { textAlign: 'left', padding: '8px 10px', borderBottom: '2px solid var(--border)', color: 'var(--text-3)', fontSize: '11px', textTransform: 'uppercase' } }, c)); });
     thead.appendChild(hr); tbl.appendChild(thead);
     const tbody = ac('tbody');
-    rows.forEach(function(row) {
+    rows.forEach(function (row) {
         const tr = ac('tr');
-        cols.forEach(function(c) { tr.appendChild(ac('td', { style: { padding: '8px 10px', borderBottom: '1px solid var(--border)' } }, String(row[c] != null ? row[c] : '—'))); });
+        cols.forEach(function (c) { tr.appendChild(ac('td', { style: { padding: '8px 10px', borderBottom: '1px solid var(--border)' } }, String(row[c] != null ? row[c] : '—'))); });
         const actTd = ac('td', { style: { padding: '8px 10px', borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' } });
-        actions(row).forEach(function(b) { actTd.appendChild(b); });
+        actions(row).forEach(function (b) { actTd.appendChild(b); });
         tr.appendChild(actTd); tbody.appendChild(tr);
     });
     tbl.appendChild(tbody); return tbl;
@@ -944,24 +1181,53 @@ function entityTable(cols, rows, actions) {
 
 function btn(label, cls, onclick) { return ac('button', { class: 'btn-sm ' + cls, style: { marginRight: '4px' }, onclick: onclick }, label); }
 
+/* ─── SPECIALIZATIONS ──────────────────────────────────────────────────────── */
+async function loadAdminSpecializations() {
+    const results = await Promise.all([adminApi('GET', '/admin/specializations'), adminApi('GET', '/admin/programs')]);
+    const specs = results[0], progs = results[1];
+    const form = ac('div', { class: 'admin-form' });
+    const nameI = ac('input', { type: 'text', placeholder: 'Specialization Name', style: { minWidth: '200px' } });
+    const pSel = ac('select', {}); pSel.appendChild(ac('option', { value: '' }, '-- Program --'));
+    progs.forEach(function (p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
+    form.appendChild(nameI); form.appendChild(pSel);
+    form.appendChild(btn('Add', 'btn-save', async function () {
+        if (!nameI.value.trim() || !pSel.value) return;
+        await adminApi('POST', '/admin/specializations', { name: nameI.value.trim(), programId: pSel.value });
+        nameI.value = ''; loadAdminSpecializations(); adminMsg('Added!');
+    }));
+    const tbl = entityTable(['id', 'name', 'programName'], specs, function (row) {
+        return [
+            btn('Edit', 'btn-edit', function () {
+                const name = prompt('Specialization name:', row.name);
+                if (name) adminApi('PUT', '/admin/specializations/' + row.id, { name: name }).then(function () { loadAdminSpecializations(); adminMsg('Saved!'); });
+            }),
+            btn('Delete', 'btn-delete', async function () {
+                if (!confirm('⚠️ Permanently delete specialization "' + row.name + '"?\n\nThis will PERMANENTLY DELETE all linked data:\n• All batches, semesters, and courses\n• All student marks and QCO mappings\n• All CO, PO, PSO data\n\nThis CANNOT be undone!')) return;
+                await adminApi('DELETE', '/admin/specializations/' + row.id); loadAdminSpecializations(); adminMsg('Deleted.');
+            })
+        ];
+    });
+    adminWrap('Specializations', form, tbl);
+}
+
 async function loadAdminPrograms() {
     const progs = await adminApi('GET', '/admin/programs');
     const form = ac('div', { class: 'admin-form' });
     const inp = ac('input', { type: 'text', placeholder: 'Program name' });
     form.appendChild(inp);
-    form.appendChild(btn('Add', 'btn-save', async function() {
+    form.appendChild(btn('Add', 'btn-save', async function () {
         if (!inp.value.trim()) return;
         await adminApi('POST', '/admin/programs', { name: inp.value.trim() });
         inp.value = ''; loadAdminPrograms(); adminMsg('Added!');
     }));
-    const tbl = entityTable(['id', 'name'], progs, function(row) {
+    const tbl = entityTable(['id', 'name'], progs, function (row) {
         return [
-            btn('Edit', 'btn-edit', function() {
+            btn('Edit', 'btn-edit', function () {
                 const name = prompt('New name:', row.name);
-                if (name) adminApi('PUT', '/admin/programs/' + row.id, { name: name }).then(function() { loadAdminPrograms(); adminMsg('Saved!'); });
+                if (name) adminApi('PUT', '/admin/programs/' + row.id, { name: name }).then(function () { loadAdminPrograms(); adminMsg('Saved!'); });
             }),
-            btn('Delete', 'btn-delete', async function() {
-                if (!confirm('Delete "' + row.name + '"?')) return;
+            btn('Delete', 'btn-delete', async function () {
+                if (!confirm('⚠️ Permanently delete program "' + row.name + '"?\n\nThis will PERMANENTLY DELETE:\n• All batches, semesters, and courses\n• All student marks and CO data\n• All POs and PSOs\n\nThis CANNOT be undone!')) return;
                 await adminApi('DELETE', '/admin/programs/' + row.id); loadAdminPrograms(); adminMsg('Deleted.');
             })
         ];
@@ -974,23 +1240,23 @@ async function loadAdminBatches() {
     const batches = results[0], progs = results[1];
     const form = ac('div', { class: 'admin-form' });
     const pSel = ac('select', {}); pSel.appendChild(ac('option', { value: '' }, '-- Program --'));
-    progs.forEach(function(p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
+    progs.forEach(function (p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
     const sYear = ac('input', { type: 'number', placeholder: 'Start Year', style: { width: '100px' } });
     const eYear = ac('input', { type: 'number', placeholder: 'End Year', style: { width: '100px' } });
     form.appendChild(pSel); form.appendChild(sYear); form.appendChild(eYear);
-    form.appendChild(btn('Add', 'btn-save', async function() {
+    form.appendChild(btn('Add', 'btn-save', async function () {
         if (!pSel.value || !sYear.value) return;
         await adminApi('POST', '/admin/batches', { programId: pSel.value, startYear: sYear.value, endYear: eYear.value });
         sYear.value = ''; eYear.value = ''; loadAdminBatches(); adminMsg('Added!');
     }));
-    const tbl = entityTable(['id', 'label', 'programName'], batches, function(row) {
+    const tbl = entityTable(['id', 'label', 'programName'], batches, function (row) {
         return [
-            btn('Edit', 'btn-edit', function() {
+            btn('Edit', 'btn-edit', function () {
                 const sy = prompt('Start year:', row.startYear), ey = prompt('End year:', row.endYear);
-                if (sy) adminApi('PUT', '/admin/batches/' + row.id, { startYear: sy, endYear: ey }).then(function() { loadAdminBatches(); adminMsg('Saved!'); });
+                if (sy) adminApi('PUT', '/admin/batches/' + row.id, { startYear: sy, endYear: ey }).then(function () { loadAdminBatches(); adminMsg('Saved!'); });
             }),
-            btn('Delete', 'btn-delete', async function() {
-                if (!confirm('Delete?')) return;
+            btn('Delete', 'btn-delete', async function () {
+                if (!confirm('⚠️ Permanently delete this batch?\n\nThis will PERMANENTLY DELETE all its semesters, courses, marks, and CO data.\n\nThis CANNOT be undone!')) return;
                 await adminApi('DELETE', '/admin/batches/' + row.id); loadAdminBatches(); adminMsg('Deleted.');
             })
         ];
@@ -1003,23 +1269,23 @@ async function loadAdminSemesters() {
     const sems = results[0], batches = results[1];
     const form = ac('div', { class: 'admin-form' });
     const bSel = ac('select', {}); bSel.appendChild(ac('option', { value: '' }, '-- Batch --'));
-    batches.forEach(function(b) { bSel.appendChild(ac('option', { value: b.id }, b.programName + ' ' + b.label)); });
+    batches.forEach(function (b) { bSel.appendChild(ac('option', { value: b.id }, b.programName + ' ' + b.label)); });
     const num = ac('input', { type: 'number', placeholder: 'Semester No.', min: 1, max: 12, style: { width: '100px' } });
     form.appendChild(bSel); form.appendChild(num);
-    form.appendChild(btn('Add', 'btn-save', async function() {
+    form.appendChild(btn('Add', 'btn-save', async function () {
         if (!bSel.value || !num.value) return;
         await adminApi('POST', '/admin/semesters', { batchId: bSel.value, number: num.value });
         num.value = ''; loadAdminSemesters(); adminMsg('Added!');
     }));
-    const disp = sems.map(function(s) { return Object.assign({}, s, { batchLabel: s.batchLabel || '—', label: 'Semester ' + s.number }); });
-    const tbl = entityTable(['id', 'label', 'batchLabel'], disp, function(row) {
+    const disp = sems.map(function (s) { return Object.assign({}, s, { batchLabel: s.batchLabel || '—', label: 'Semester ' + s.number }); });
+    const tbl = entityTable(['id', 'label', 'batchLabel'], disp, function (row) {
         return [
-            btn('Edit', 'btn-edit', function() {
+            btn('Edit', 'btn-edit', function () {
                 const n = prompt('Semester number:', row.number);
-                if (n) adminApi('PUT', '/admin/semesters/' + row.id, { number: n }).then(function() { loadAdminSemesters(); adminMsg('Saved!'); });
+                if (n) adminApi('PUT', '/admin/semesters/' + row.id, { number: n }).then(function () { loadAdminSemesters(); adminMsg('Saved!'); });
             }),
-            btn('Delete', 'btn-delete', async function() {
-                if (!confirm('Delete?')) return;
+            btn('Delete', 'btn-delete', async function () {
+                if (!confirm('⚠️ Permanently delete this semester?\n\nThis will PERMANENTLY DELETE all its courses, student marks, QCO mappings, and CO data.\n\nThis CANNOT be undone!')) return;
                 await adminApi('DELETE', '/admin/semesters/' + row.id); loadAdminSemesters(); adminMsg('Deleted.');
             })
         ];
@@ -1028,31 +1294,77 @@ async function loadAdminSemesters() {
 }
 
 async function loadAdminCourses() {
-    const results = await Promise.all([adminApi('GET', '/admin/courses'), adminApi('GET', '/admin/semesters'), adminApi('GET', '/admin/programs'), adminApi('GET', '/admin/batches')]);
-    const courses = results[0], sems = results[1], progs = results[2], batches = results[3];
+    const results = await Promise.all([
+        adminApi('GET', '/admin/courses'),
+        adminApi('GET', '/admin/semesters'),
+        adminApi('GET', '/admin/programs'),
+        adminApi('GET', '/admin/batches'),
+        adminApi('GET', '/admin/specializations')
+    ]);
+    const courses = results[0], sems = results[1], progs = results[2], batches = results[3], allSpecs = results[4];
     const form = ac('div', { class: 'admin-form' });
     const codeI = ac('input', { type: 'text', placeholder: 'Code' });
     const nameI = ac('input', { type: 'text', placeholder: 'Course Name', style: { minWidth: '200px' } });
     const pSel = ac('select', {}); pSel.appendChild(ac('option', { value: '' }, '-- Program --'));
-    progs.forEach(function(p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
+    progs.forEach(function (p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
     const bSel = ac('select', {}); bSel.appendChild(ac('option', { value: '' }, '-- Batch --'));
-    batches.forEach(function(b) { bSel.appendChild(ac('option', { value: b.id }, b.programName + ' ' + b.label)); });
+    batches.forEach(function (b) { bSel.appendChild(ac('option', { value: b.id }, b.programName + ' ' + b.label)); });
     const sSel = ac('select', {}); sSel.appendChild(ac('option', { value: '' }, '-- Semester --'));
-    sems.forEach(function(s) { sSel.appendChild(ac('option', { value: s.id }, 'Sem ' + s.number + ' (' + s.batchLabel + ')')); });
+    sems.forEach(function (s) { sSel.appendChild(ac('option', { value: s.id }, 'Sem ' + s.number + ' (' + s.batchLabel + ')')); });
     form.appendChild(codeI); form.appendChild(nameI); form.appendChild(pSel); form.appendChild(bSel); form.appendChild(sSel);
-    form.appendChild(btn('Add', 'btn-save', async function() {
+    form.appendChild(btn('Add', 'btn-save', async function () {
         if (!codeI.value || !nameI.value) return;
         await adminApi('POST', '/admin/courses', { courseCode: codeI.value, courseName: nameI.value, programId: pSel.value, batchId: bSel.value, semesterId: sSel.value });
         codeI.value = ''; nameI.value = ''; loadAdminCourses(); adminMsg('Added!');
     }));
-    const tbl = entityTable(['id', 'courseCode', 'courseName', 'programName', 'semesterNumber'], courses, function(row) {
+    // Enhanced table with Edit button that opens inline form for code, name, semester, and specialization
+    const tbl = entityTable(['id', 'courseCode', 'courseName', 'programName', 'semesterNumber'], courses, function (row) {
         return [
-            btn('Edit', 'btn-edit', function() {
-                const code = prompt('Code:', row.courseCode), name = prompt('Name:', row.courseName);
-                if (code && name) adminApi('PUT', '/admin/courses/' + row.id, { courseCode: code, courseName: name }).then(function() { loadAdminCourses(); adminMsg('Saved!'); });
+            btn('Edit', 'btn-edit', function () {
+                // Show edit modal as inline row
+                const card = document.getElementById('admin-content').querySelector('.data-card');
+                let editRow = card.querySelector('#edit-course-row');
+                if (editRow) editRow.remove();
+                editRow = ac('div', { id: 'edit-course-row', style: { background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: '8px', padding: '12px', marginBottom: '10px' } });
+                const eCode = ac('input', { type: 'text', placeholder: 'Code', style: { marginRight: '6px', padding: '5px 8px', border: '1px solid #cbd5e1', borderRadius: '5px' } }); eCode.value = row.courseCode;
+                const eName = ac('input', { type: 'text', placeholder: 'Name', style: { marginRight: '6px', padding: '5px 8px', border: '1px solid #cbd5e1', borderRadius: '5px', minWidth: '180px' } }); eName.value = row.courseName;
+                const eSem = ac('select', { style: { marginRight: '6px', padding: '5px 8px', border: '1px solid #cbd5e1', borderRadius: '5px' } });
+                eSem.appendChild(ac('option', { value: '' }, '-- Keep Semester --'));
+                sems.forEach(function (s) {
+                    const o = ac('option', { value: s.id }, 'Sem ' + s.number + ' (' + s.batchLabel + ')');
+                    if (s.id == row.semesterId) o.selected = true;
+                    eSem.appendChild(o);
+                });
+                const eSpec = ac('select', { style: { marginRight: '6px', padding: '5px 8px', border: '1px solid #cbd5e1', borderRadius: '5px' } });
+                eSpec.appendChild(ac('option', { value: '' }, '-- Keep Specialization --'));
+                // Filter specs to the course's program
+                var courseSpecs = allSpecs.filter(function (s) { return !row.programName || s.programName === row.programName; });
+                if (courseSpecs.length === 0) courseSpecs = allSpecs;
+                courseSpecs.forEach(function (s) {
+                    const o = ac('option', { value: s.id }, s.name + ' (' + s.programName + ')');
+                    if (s.id == row.specializationId) o.selected = true;
+                    eSpec.appendChild(o);
+                });
+                const saveBtn = btn('Save', 'btn-save', async function () {
+                    const payload = { courseCode: eCode.value, courseName: eName.value };
+                    if (eSem.value) payload.semesterId = eSem.value;
+                    if (eSpec.value) payload.specializationId = eSpec.value;
+                    await adminApi('PUT', '/admin/courses/' + row.id, payload);
+                    editRow.remove(); loadAdminCourses(); adminMsg('Saved!');
+                });
+                const cancelBtn = btn('✕', 'btn-edit', function () { editRow.remove(); });
+                editRow.appendChild(ac('strong', {}, 'Editing: ' + row.courseCode));
+                editRow.appendChild(ac('br', {}));
+                editRow.appendChild(eCode); editRow.appendChild(eName);
+                editRow.appendChild(ac('span', { style: { marginRight: '6px', fontSize: '12px', color: '#64748b' } }, 'Semester:'));
+                editRow.appendChild(eSem);
+                editRow.appendChild(ac('span', { style: { marginRight: '6px', fontSize: '12px', color: '#64748b' } }, 'Spec:'));
+                editRow.appendChild(eSpec);
+                editRow.appendChild(saveBtn); editRow.appendChild(cancelBtn);
+                card.insertBefore(editRow, card.firstChild.nextSibling);
             }),
-            btn('Delete', 'btn-delete', async function() {
-                if (!confirm('Delete "' + row.courseCode + '"?')) return;
+            btn('Delete', 'btn-delete', async function () {
+                if (!confirm('⚠️ Permanently delete course "' + row.courseCode + '"?\n\nThis will PERMANENTLY DELETE all student marks, QCO mappings, and CO data for this course.\n\nThis CANNOT be undone!')) return;
                 await adminApi('DELETE', '/admin/courses/' + row.id); loadAdminCourses(); adminMsg('Deleted.');
             })
         ];
@@ -1060,18 +1372,19 @@ async function loadAdminCourses() {
     adminWrap('Courses', form, tbl);
 }
 
+
 async function loadAdminCOs() {
     const courses = await adminApi('GET', '/admin/courses');
     const form = ac('div', { class: 'admin-form' });
     const cSel = ac('select', {}); cSel.appendChild(ac('option', { value: '' }, '-- Course --'));
-    courses.forEach(function(c) { cSel.appendChild(ac('option', { value: c.id }, c.courseCode + ' – ' + c.courseName)); });
+    courses.forEach(function (c) { cSel.appendChild(ac('option', { value: c.id }, c.courseCode + ' – ' + c.courseName)); });
     form.appendChild(cSel);
-    form.appendChild(btn('Load COs', 'btn-save', function() { loadAdminCOsForCourse(cSel.value); }));
+    form.appendChild(btn('Load COs', 'btn-save', function () { loadAdminCOsForCourse(cSel.value); }));
     const addForm = ac('div', { class: 'admin-form', style: { marginTop: '12px' } });
     const codeI = ac('input', { type: 'text', placeholder: 'CO Code (e.g. CO1)' });
     const descI = ac('input', { type: 'text', placeholder: 'Description', style: { minWidth: '250px' } });
     addForm.appendChild(codeI); addForm.appendChild(descI);
-    addForm.appendChild(btn('Add CO', 'btn-save', async function() {
+    addForm.appendChild(btn('Add CO', 'btn-save', async function () {
         if (!cSel.value || !codeI.value) return;
         await adminApi('POST', '/admin/cos', { courseId: cSel.value, code: codeI.value, description: descI.value });
         codeI.value = ''; descI.value = ''; loadAdminCOsForCourse(cSel.value); adminMsg('Added!');
@@ -1087,13 +1400,13 @@ async function loadAdminCOsForCourse(courseId) {
     const card = document.getElementById('admin-content').querySelector('.data-card');
     let tblWrap = card.querySelector('.co-table-wrap');
     if (!tblWrap) { tblWrap = ac('div', { class: 'co-table-wrap' }); card.appendChild(tblWrap); }
-    const tbl = entityTable(['id', 'code', 'description', 'courseCode'], cos, function(row) {
+    const tbl = entityTable(['id', 'code', 'description', 'courseCode'], cos, function (row) {
         return [
-            btn('Edit', 'btn-edit', function() {
+            btn('Edit', 'btn-edit', function () {
                 const code = prompt('CO Code:', row.code), desc = prompt('Description:', row.description);
-                if (code) adminApi('PUT', '/admin/cos/' + row.id, { code: code, description: desc }).then(function() { loadAdminCOsForCourse(courseId); adminMsg('Saved!'); });
+                if (code) adminApi('PUT', '/admin/cos/' + row.id, { code: code, description: desc }).then(function () { loadAdminCOsForCourse(courseId); adminMsg('Saved!'); });
             }),
-            btn('Delete', 'btn-delete', async function() {
+            btn('Delete', 'btn-delete', async function () {
                 if (!confirm('Delete "' + row.code + '"?')) return;
                 await adminApi('DELETE', '/admin/cos/' + row.id); loadAdminCOsForCourse(courseId); adminMsg('Deleted.');
             })
@@ -1107,22 +1420,22 @@ async function loadAdminPOs() {
     const pos = results[0], progs = results[1];
     const form = ac('div', { class: 'admin-form' });
     const pSel = ac('select', {}); pSel.appendChild(ac('option', { value: '' }, '-- Program --'));
-    progs.forEach(function(p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
+    progs.forEach(function (p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
     const codeI = ac('input', { type: 'text', placeholder: 'PO Code (e.g. PO1)' });
     const descI = ac('input', { type: 'text', placeholder: 'Description', style: { minWidth: '250px' } });
     form.appendChild(pSel); form.appendChild(codeI); form.appendChild(descI);
-    form.appendChild(btn('Add PO', 'btn-save', async function() {
+    form.appendChild(btn('Add PO', 'btn-save', async function () {
         if (!pSel.value || !codeI.value) return;
         await adminApi('POST', '/admin/pos', { programId: pSel.value, code: codeI.value, description: descI.value });
         codeI.value = ''; descI.value = ''; loadAdminPOs(); adminMsg('Added!');
     }));
-    const tbl = entityTable(['id', 'code', 'description', 'programName'], pos, function(row) {
+    const tbl = entityTable(['id', 'code', 'description', 'programName'], pos, function (row) {
         return [
-            btn('Edit', 'btn-edit', function() {
+            btn('Edit', 'btn-edit', function () {
                 const code = prompt('PO Code:', row.code), desc = prompt('Description:', row.description);
-                if (code) adminApi('PUT', '/admin/pos/' + row.id, { code: code, description: desc }).then(function() { loadAdminPOs(); adminMsg('Saved!'); });
+                if (code) adminApi('PUT', '/admin/pos/' + row.id, { code: code, description: desc }).then(function () { loadAdminPOs(); adminMsg('Saved!'); });
             }),
-            btn('Delete', 'btn-delete', async function() {
+            btn('Delete', 'btn-delete', async function () {
                 if (!confirm('Delete "' + row.code + '"?')) return;
                 await adminApi('DELETE', '/admin/pos/' + row.id); loadAdminPOs(); adminMsg('Deleted.');
             })
@@ -1136,22 +1449,22 @@ async function loadAdminPSOs() {
     const psos = results[0], progs = results[1];
     const form = ac('div', { class: 'admin-form' });
     const pSel = ac('select', {}); pSel.appendChild(ac('option', { value: '' }, '-- Program --'));
-    progs.forEach(function(p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
+    progs.forEach(function (p) { pSel.appendChild(ac('option', { value: p.id }, p.name)); });
     const codeI = ac('input', { type: 'text', placeholder: 'PSO Code (e.g. PSO1)' });
     const descI = ac('input', { type: 'text', placeholder: 'Description', style: { minWidth: '250px' } });
     form.appendChild(pSel); form.appendChild(codeI); form.appendChild(descI);
-    form.appendChild(btn('Add PSO', 'btn-save', async function() {
+    form.appendChild(btn('Add PSO', 'btn-save', async function () {
         if (!pSel.value || !codeI.value) return;
         await adminApi('POST', '/admin/psos', { programId: pSel.value, code: codeI.value, description: descI.value });
         codeI.value = ''; descI.value = ''; loadAdminPSOs(); adminMsg('Added!');
     }));
-    const tbl = entityTable(['id', 'code', 'description', 'programName'], psos, function(row) {
+    const tbl = entityTable(['id', 'code', 'description', 'programName'], psos, function (row) {
         return [
-            btn('Edit', 'btn-edit', function() {
+            btn('Edit', 'btn-edit', function () {
                 const code = prompt('PSO Code:', row.code), desc = prompt('Description:', row.description);
-                if (code) adminApi('PUT', '/admin/psos/' + row.id, { code: code, description: desc }).then(function() { loadAdminPSOs(); adminMsg('Saved!'); });
+                if (code) adminApi('PUT', '/admin/psos/' + row.id, { code: code, description: desc }).then(function () { loadAdminPSOs(); adminMsg('Saved!'); });
             }),
-            btn('Delete', 'btn-delete', async function() {
+            btn('Delete', 'btn-delete', async function () {
                 if (!confirm('Delete "' + row.code + '"?')) return;
                 await adminApi('DELETE', '/admin/psos/' + row.id); loadAdminPSOs(); adminMsg('Deleted.');
             })
@@ -1166,9 +1479,9 @@ async function loadAdminCoPo() {
     const courses = await adminApi('GET', '/admin/courses');
     const form = ac('div', { class: 'admin-form' });
     const cSel = ac('select', {}); cSel.appendChild(ac('option', { value: '' }, '-- Select Course --'));
-    courses.forEach(function(c) { cSel.appendChild(ac('option', { value: c.id }, c.courseCode + ' – ' + c.courseName)); });
+    courses.forEach(function (c) { cSel.appendChild(ac('option', { value: c.id }, c.courseCode + ' – ' + c.courseName)); });
     form.appendChild(cSel);
-    form.appendChild(btn('Load Matrix', 'btn-save', function() { renderCoPoMatrix(cSel.value); }));
+    form.appendChild(btn('Load Matrix', 'btn-save', function () { renderCoPoMatrix(cSel.value); }));
     adminWrap('CO-PO Mapping Matrix', form, ac('div', {}));
 }
 
@@ -1184,17 +1497,17 @@ async function renderCoPoMatrix(courseId) {
     const tbl = ac('table', { style: { borderCollapse: 'separate', borderSpacing: '3px' } });
     const hrow = ac('tr');
     hrow.appendChild(ac('th', { style: { minWidth: '120px', textAlign: 'left', padding: '4px 8px', fontSize: '11px' } }, 'CO \\ PO'));
-    pos.forEach(function(po) { const th = ac('th', { style: { minWidth: '38px', textAlign: 'center', fontSize: '11px', padding: '2px' } }, po.code); th.title = po.description || po.code; hrow.appendChild(th); });
+    pos.forEach(function (po) { const th = ac('th', { style: { minWidth: '38px', textAlign: 'center', fontSize: '11px', padding: '2px' } }, po.code); th.title = po.description || po.code; hrow.appendChild(th); });
     tbl.appendChild(hrow);
-    cos.forEach(function(co) {
+    cos.forEach(function (co) {
         const row = ac('tr');
         const labTd = ac('td', { style: { padding: '4px 8px', fontSize: '12px', fontWeight: 600 } }, co.code);
         labTd.title = co.description || co.code; row.appendChild(labTd);
-        pos.forEach(function(po) {
+        pos.forEach(function (po) {
             const w = (matrixWeights[co.id] || {})[po.id] || 0;
             const cell = ac('td', {});
             const inp = ac('button', { class: 'matrix-cell w' + w, 'data-co': co.id, 'data-po': po.id }, String(w));
-            inp.addEventListener('click', function() {
+            inp.addEventListener('click', function () {
                 const nw = (parseInt(inp.textContent) + 1) % 4;
                 inp.textContent = nw; inp.className = 'matrix-cell w' + nw;
                 if (!matrixWeights[co.id]) matrixWeights[co.id] = {};
@@ -1206,7 +1519,7 @@ async function renderCoPoMatrix(courseId) {
     });
     wrap.appendChild(tbl);
     const saveBtn = ac('button', { class: 'btn-sm btn-save', style: { marginTop: '14px' } }, 'Save CO-PO Mapping');
-    saveBtn.addEventListener('click', async function() {
+    saveBtn.addEventListener('click', async function () {
         await adminApi('PUT', '/admin/copo', { courseId: courseId, weights: matrixWeights });
         adminMsg('CO-PO mapping saved!');
     });
@@ -1220,9 +1533,9 @@ async function loadAdminCoPso() {
     const courses = await adminApi('GET', '/admin/courses');
     const form = ac('div', { class: 'admin-form' });
     const cSel = ac('select', {}); cSel.appendChild(ac('option', { value: '' }, '-- Select Course --'));
-    courses.forEach(function(c) { cSel.appendChild(ac('option', { value: c.id }, c.courseCode + ' – ' + c.courseName)); });
+    courses.forEach(function (c) { cSel.appendChild(ac('option', { value: c.id }, c.courseCode + ' – ' + c.courseName)); });
     form.appendChild(cSel);
-    form.appendChild(btn('Load Matrix', 'btn-save', function() { renderCoPsoMatrix(cSel.value); }));
+    form.appendChild(btn('Load Matrix', 'btn-save', function () { renderCoPsoMatrix(cSel.value); }));
     adminWrap('CO-PSO Mapping Matrix', form, ac('div', {}));
 }
 
@@ -1239,17 +1552,17 @@ async function renderCoPsoMatrix(courseId) {
     const tbl = ac('table', { style: { borderCollapse: 'separate', borderSpacing: '3px' } });
     const hrow = ac('tr');
     hrow.appendChild(ac('th', { style: { minWidth: '120px', textAlign: 'left', padding: '4px 8px', fontSize: '11px' } }, 'CO \\ PSO'));
-    psos.forEach(function(pso) { const th = ac('th', { style: { minWidth: '38px', textAlign: 'center', fontSize: '11px', padding: '2px' } }, pso.code); th.title = pso.description || pso.code; hrow.appendChild(th); });
+    psos.forEach(function (pso) { const th = ac('th', { style: { minWidth: '38px', textAlign: 'center', fontSize: '11px', padding: '2px' } }, pso.code); th.title = pso.description || pso.code; hrow.appendChild(th); });
     tbl.appendChild(hrow);
-    cos.forEach(function(co) {
+    cos.forEach(function (co) {
         const row = ac('tr');
         const labTd = ac('td', { style: { padding: '4px 8px', fontSize: '12px', fontWeight: 600 } }, co.code);
         labTd.title = co.description || co.code; row.appendChild(labTd);
-        psos.forEach(function(pso) {
+        psos.forEach(function (pso) {
             const w = (psoMatrixWeights[co.id] || {})[pso.id] || 0;
             const cell = ac('td', {});
             const inp = ac('button', { class: 'matrix-cell w' + w }, String(w));
-            inp.addEventListener('click', function() {
+            inp.addEventListener('click', function () {
                 const nw = (parseInt(inp.textContent) + 1) % 4;
                 inp.textContent = nw; inp.className = 'matrix-cell w' + nw;
                 if (!psoMatrixWeights[co.id]) psoMatrixWeights[co.id] = {};
@@ -1261,7 +1574,7 @@ async function renderCoPsoMatrix(courseId) {
     });
     wrap.appendChild(tbl);
     const saveBtn = ac('button', { class: 'btn-sm btn-save', style: { marginTop: '14px' } }, 'Save CO-PSO Mapping');
-    saveBtn.addEventListener('click', async function() {
+    saveBtn.addEventListener('click', async function () {
         await adminApi('PUT', '/admin/copso', { courseId: courseId, weights: psoMatrixWeights });
         adminMsg('CO-PSO mapping saved!');
     });

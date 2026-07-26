@@ -269,7 +269,8 @@ tr:hover td{background:var(--bg)}
 
       <div class="upload-card">
         <h3>📊 Upload Mark Sheets</h3>
-        <p>Upload a ZIP file containing Excel (.xlsx) mark sheets. Files should be named <code>COURSECODE_name_type.xlsx</code>. Supports end_term and mid_term files.</p>
+        <p>Upload a ZIP file containing Excel (.xlsx) mark sheets. Files should be named <code>COURSECODE_name_type.xlsx</code> or <code>COURSECODE NAME (mid term).xlsx</code> / <code>(end term).xlsx</code>. Supports end_term and mid_term files.<br>
+          <small style="color:var(--text-2)">💡 <strong>SOET marks</strong>: Select all files from the <code>SOET/</code> folder → right-click → Compress → upload the ZIP here.</small></p>
         <div class="drop-zone" id="zipZone" onclick="document.getElementById('zipInput').click()"
              ondragover="event.preventDefault();this.classList.add('over')"
              ondragleave="this.classList.remove('over')"
@@ -284,6 +285,106 @@ tr:hover td{background:var(--bg)}
           <span id="zipName" style="font-size:12px;color:var(--text-3)"></span>
         </div>
         <div class="upload-result" id="zipResult"></div>
+      </div>
+
+      <!-- Upload Single Mark Sheet Excel (question-wise marks entry report) -->
+      <div class="upload-card" style="border-top:3px solid #0ea5e9;">
+        <h3>📝 Upload Single Mark Sheet (Question-Wise Report)</h3>
+        <p>Upload a <strong>single question-wise marks entry report</strong> Excel (.xlsx) file directly — no ZIP needed.<br>
+          Same format as the SOET mark sheets (e.g. <code>ETCS206A COMPUTER GRAPHICS (mid term).xlsx</code>).<br>
+          <strong>Exam type is detected from the filename:</strong>
+          <code>(mid term)</code> → mid_term &nbsp;|&nbsp; <code>(end term)</code> → end_term
+        </p>
+        <div class="drop-zone" id="singleExcelZone"
+             onclick="document.getElementById('singleExcelInput').click()"
+             ondragover="event.preventDefault();this.classList.add('over')"
+             ondragleave="this.classList.remove('over')"
+             ondrop="handleDrop(event,'singleExcelInput')">
+          <i class="fas fa-file-excel" style="color:#0ea5e9"></i>
+          <p id="singleExcelLabel">Click or drag mark sheet .xlsx here</p>
+          <small>e.g. "COURSECODE NAME (mid term).xlsx"</small>
+        </div>
+        <input type="file" id="singleExcelInput" accept=".xlsx" style="display:none"
+               onchange="onSingleExcelSelect(event)">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+          <button class="btn-primary" id="singleExcelBtn"
+                  onclick="uploadSingleExcel()" disabled
+                  style="background:#0ea5e9">
+            <i class="fas fa-upload"></i> Upload Mark Sheet
+          </button>
+          <span id="singleExcelName" style="font-size:12px;color:var(--text-3)"></span>
+        </div>
+        <div class="upload-result" id="singleExcelResult"></div>
+      </div>
+
+      <!-- Upload Question-Wise Marks Entry Report (Sheet2 format from university portal) -->
+      <div class="upload-card" style="border-top:3px solid #f59e0b;">
+        <h3>📊 Upload Question-Wise Marks Report</h3>
+        <p>Upload the university <strong>Question wise marks entry report</strong> Excel
+          (e.g. <code>Question wise marks entry report Odd sem.xlsx</code>).<br>
+          Format: <code>Sheet2</code> with <em>Roll no, Course Code, Class Name, Component Name, Q1…Q24</em>.<br>
+          <strong>Component → exam type:</strong>
+          <code>Class Test</code> (Freq 1) → mid_term (max 20) &nbsp;|&nbsp;
+          <code>End Term Examination</code> → end_term (max 50)<br>
+          <small style="color:var(--text-2)">Practical Internal / External and Class Test Frequency 2 are automatically skipped.
+          Safe to re-upload — duplicates are never created.</small>
+        </p>
+        <div class="drop-zone" id="qwiseZone"
+             onclick="document.getElementById('qwiseInput').click()"
+             ondragover="event.preventDefault();this.classList.add('over')"
+             ondragleave="this.classList.remove('over')"
+             ondrop="handleDrop(event,'qwiseInput')">
+          <i class="fas fa-table" style="color:#f59e0b"></i>
+          <p id="qwiseLabel">Click or drag Question-Wise Report .xlsx here</p>
+          <small>e.g. "Question wise marks entry report Odd sem.xlsx"</small>
+        </div>
+        <input type="file" id="qwiseInput" accept=".xlsx" style="display:none"
+               onchange="onQwiseSelect(event)">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+          <button class="btn-primary" id="qwiseBtn"
+                  onclick="uploadQwiseReport()" disabled
+                  style="background:#f59e0b;color:#1e1e1e">
+            <i class="fas fa-upload"></i> Upload Report
+          </button>
+          <span id="qwiseName" style="font-size:12px;color:var(--text-3)"></span>
+        </div>
+        <div class="upload-result" id="qwiseResult"></div>
+      </div>
+
+      <!-- Upload Result Excel (mid_term + end_term from university result sheet) -->
+
+      <div class="upload-card" style="border-top:3px solid var(--success);">
+        <h3>📋 Upload University Result Excel (Mid + End Term Marks)</h3>
+        <div style="background:#fef3c7;border:1px solid #fbbf24;border-radius:7px;padding:10px 14px;margin-bottom:10px;font-size:12.5px">
+          ⚠️ <strong>This card is ONLY for the university result file</strong> (e.g. <code>Result Odd Sem 2025-26.xlsx</code>) that has a <strong>Sheet2</strong> with student marks.<br>
+          To upload a CO-PO mapping structure file, scroll down to the <strong>📊 Upload CO-PO Mapping Sheet</strong> card instead.
+        </div>
+        <p>Reads <strong>Sheet2</strong> — one row per student-course.<br>
+          <strong>Internal Marks → mid_term (max 20)</strong> &nbsp;|&nbsp;
+          <strong>External Marks → end_term (max 50)</strong><br>
+          Absent (Grade=AB) rows are skipped. Re-uploading is safe — duplicates are never created.
+        </p>
+
+        <div class="drop-zone" id="resultExcelZone"
+             onclick="document.getElementById('resultExcelInput').click()"
+             ondragover="event.preventDefault();this.classList.add('over')"
+             ondragleave="this.classList.remove('over')"
+             ondrop="handleDrop(event,'resultExcelInput')">
+          <i class="fas fa-file-excel" style="color:var(--success)"></i>
+          <p id="resultExcelLabel">Click or drag Result Excel .xlsx here</p>
+          <small>e.g. "Result Odd Sem 2025-26.xlsx"</small>
+        </div>
+        <input type="file" id="resultExcelInput" accept=".xlsx" style="display:none"
+               onchange="onResultExcelSelect(event)">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+          <button class="btn-primary" id="resultExcelBtn"
+                  onclick="uploadResultExcel()" disabled
+                  style="background:var(--success)">
+            <i class="fas fa-upload"></i> Upload Result Excel
+          </button>
+          <span id="resultExcelName" style="font-size:12px;color:var(--text-3)"></span>
+        </div>
+        <div class="upload-result" id="resultExcelResult"></div>
       </div>
 
       <div class="upload-card" style="grid-column:1/-1; border-top:3px solid var(--accent);">
@@ -341,6 +442,56 @@ tr:hover td{background:var(--bg)}
         </div>
         <div class="upload-result" id="pdfResult"></div>
       </div>
+
+      <div class="upload-card" style="grid-column:1/-1; border-top:3px solid #7c3aed;">
+        <h3>📊 Upload CO-PO Mapping Sheet (Excel)</h3>
+        <p>Upload a <strong>CO PO MAPPING SHEET</strong> Excel file to create courses, COs, POs, PSOs and all CO-PO / CO-PSO mappings automatically. Provide programme and batch details below.</p>
+        <!-- Quick-fill presets -->
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          <span style="font-size:12px;color:var(--text-2);align-self:center">Quick fill:</span>
+          <button type="button" class="btn-sm" onclick="cmapQuickFill('BTech','',2025,2029)" style="background:#e0e7ff;color:#3730a3;border:none;cursor:pointer;padding:4px 10px;border-radius:5px;font-size:12px;font-weight:600">BTech CSE 2025-2029</button>
+          <button type="button" class="btn-sm" onclick="cmapQuickFill('BSc','Computer Science',2025,2027)" style="background:#d1fae5;color:#065f46;border:none;cursor:pointer;padding:4px 10px;border-radius:5px;font-size:12px;font-weight:600">BSc CS 2025-2027</button>
+        </div>
+        <div class="override-row" style="grid-template-columns:repeat(4,1fr);">
+          <div>
+            <label>Programme <span style="color:var(--danger)">*</span></label>
+            <select id="cmapProgram">
+              <option value="">-- Select --</option>
+              <option value="BSc">BSc</option>
+              <option value="BTech">BTech</option>
+              <option value="BCA">BCA</option>
+              <option value="MCA">MCA</option>
+              <option value="MTech">MTech</option>
+            </select>
+          </div>
+          <div>
+            <label>Specialization <span style="font-weight:400">(optional)</span></label>
+            <input type="text" id="cmapSpec" placeholder="e.g. Computer Science" style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:var(--bg);color:var(--text);width:100%;">
+          </div>
+          <div>
+            <label>Batch Start Year <span style="color:var(--danger)">*</span></label>
+            <input type="number" id="cmapStartYear" placeholder="e.g. 2025" min="2020" max="2035" style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:var(--bg);color:var(--text);width:100%;">
+          </div>
+          <div>
+            <label>Batch End Year <span style="color:var(--danger)">*</span></label>
+            <input type="number" id="cmapEndYear" placeholder="e.g. 2027" min="2022" max="2040" style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:var(--bg);color:var(--text);width:100%;">
+          </div>
+        </div>
+        <div class="drop-zone" id="cmapZone" onclick="document.getElementById('cmapInput').click()"
+             ondragover="event.preventDefault();this.classList.add('over')"
+             ondragleave="this.classList.remove('over')"
+             ondrop="handleDrop(event,'cmapInput')">
+          <i class="fas fa-file-excel" style="color:#7c3aed"></i>
+          <p id="cmapLabel">Click or drag CO PO MAPPING SHEET Excel here</p>
+          <small>CO PO MAPPING SHEET *.xlsx</small>
+        </div>
+        <input type="file" id="cmapInput" accept=".xlsx" style="display:none" onchange="onCmapSelect(event)">
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+          <button class="btn-primary" id="cmapBtn" onclick="uploadCoPoMap()" disabled style="background:#7c3aed"><i class="fas fa-project-diagram"></i> Upload CO-PO Mapping</button>
+          <span id="cmapName" style="font-size:12px;color:var(--text-3)"></span>
+        </div>
+        <div class="upload-result" id="cmapResult"></div>
+      </div>
     </div>
   </div>
 
@@ -371,6 +522,7 @@ tr:hover td{background:var(--bg)}
   <div id="view-admin" class="hidden">
     <div style="display:flex; gap: 4px; border-bottom:1px solid var(--border); margin-bottom:16px; flex-wrap:wrap;">
       <button class="admin-nav-btn active" onclick="adminSection('programs',this)">Programs</button>
+      <button class="admin-nav-btn" onclick="adminSection('specializations',this)">Specializations</button>
       <button class="admin-nav-btn" onclick="adminSection('batches',this)">Batches</button>
       <button class="admin-nav-btn" onclick="adminSection('semesters',this)">Semesters</button>
       <button class="admin-nav-btn" onclick="adminSection('courses',this)">Courses</button>
@@ -380,6 +532,7 @@ tr:hover td{background:var(--bg)}
       <button class="admin-nav-btn" onclick="adminSection('copo',this)">CO-PO</button>
       <button class="admin-nav-btn" onclick="adminSection('copso',this)">CO-PSO</button>
     </div>
+
     <div id="admin-content">
       <div class="data-card" style="padding:20px;text-align:center;color:var(--text-3)">Select an entity above to manage data.</div>
     </div>

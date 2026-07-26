@@ -25,6 +25,8 @@ public class AdminController {
     private final COPSORepository coPsoMappingRepository;
     private final SpecializationRepository specializationRepository;
     private final StudentRepository studentRepository;
+    private final StudentMarkRepository studentMarkRepository;
+    private final QuestionCOMappingRepository questionCOMappingRepository;
 
     // ═══ STUDENT SPECIALIZATION MANAGEMENT ═══════════════════════════════════
 
@@ -136,12 +138,122 @@ public class AdminController {
         }).orElse(ResponseEntity.notFound().build());
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // CASCADE DELETE HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /** Deletes a course and ALL its dependent data: marks, QCO mappings, COs (+ CO-PO/CO-PSO maps). */
+    @org.springframework.transaction.annotation.Transactional
+    private int cascadeDeleteCourse(Course c) {
+        // 1. Student marks
+        studentMarkRepository.deleteAll(studentMarkRepository.findByCourse(c));
+        // 2. QCO mappings
+        questionCOMappingRepository.deleteAll(questionCOMappingRepository.findByCourse(c));
+        // 3. COs + their PO/PSO maps
+        List<CO> cos = coRepository.findByCourse(c);
+        for (CO co : cos) {
+            coPoMappingRepository.deleteAll(coPoMappingRepository.findByCo(co));
+            coPsoMappingRepository.deleteAll(coPsoMappingRepository.findByCo(co));
+        }
+        coRepository.deleteAll(cos);
+        // 4. Course
+        courseRepository.delete(c);
+        return cos.size();
+    }
+
+    /** Deletes a semester and all its courses (cascade). */
+    @org.springframework.transaction.annotation.Transactional
+    private void cascadeDeleteSemester(Semester sem) {
+        courseRepository.findBySemesterId(sem.getId()).forEach(this::cascadeDeleteCourse);
+        semesterRepository.delete(sem);
+    }
+
+    /** Deletes a batch and all its semesters (cascade). */
+    @org.springframework.transaction.annotation.Transactional
+    private void cascadeDeleteBatch(Batch batch) {
+        semesterRepository.findByBatch(batch).forEach(this::cascadeDeleteSemester);
+        batchRepository.delete(batch);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PROGRAMS
+    // ─────────────────────────────────────────────────────────────────────────
+
     @DeleteMapping("/programs/{id}")
+    @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> deleteProgram(@PathVariable Long id) {
-        if (!programRepository.existsById(id))
-            return ResponseEntity.notFound().build();
+        Program prog = programRepository.findById(id).orElse(null);
+        if (prog == null) return ResponseEntity.notFound().build();
+        // Cascade: delete all batches (→ semesters → courses → marks/QCOs/COs)
+        batchRepository.findByProgram(prog).forEach(this::cascadeDeleteBatch);
+        // Delete POs and PSOs for this program
+        poRepository.deleteAll(poRepository.findByProgram(prog));
+        psoRepository.deleteAll(psoRepository.findByProgram(prog));
+        // Nullify student program references
+        studentRepository.findAll().stream()
+                .filter(s -> prog.equals(s.getProgram()))
+                .forEach(s -> { s.setProgram(null); studentRepository.save(s); });
         programRepository.deleteById(id);
-        return ResponseEntity.ok(Map.of("deleted", id));
+        return ResponseEntity.ok(Map.of("deleted", id, "name", prog.getName()));
+    }
+
+    // ═══ SPECIALIZATIONS ═════════════════════════════════════════════════════
+
+    @GetMapping("/specializations")
+    public List<Map<String, Object>> getSpecializations(
+            @RequestParam(required = false) Long programId) {
+        List<Specialization> specs = programId != null
+                ? specializationRepository.findByProgramId(programId)
+                : specializationRepository.findAll();
+        return specs.stream().map(sp -> {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", sp.getId());
+            m.put("name", sp.getName());
+            m.put("programId",   sp.getProgram() != null ? sp.getProgram().getId() : null);
+            m.put("programName", sp.getProgram() != null ? sp.getProgram().getName() : null);
+            return m;
+        }).collect(Collectors.toList());
+    }
+
+    @PostMapping("/specializations")
+    public ResponseEntity<?> createSpecialization(@RequestBody Map<String, Object> body) {
+        Specialization sp = new Specialization();
+        sp.setName(getStr(body, "name"));
+        if (body.get("programId") != null)
+            programRepository.findById(toLong(body, "programId")).ifPresent(sp::setProgram);
+        return ResponseEntity.ok(specializationRepository.save(sp));
+    }
+
+    @PutMapping("/specializations/{id}")
+    public ResponseEntity<?> updateSpecialization(@PathVariable Long id,
+                                                  @RequestBody Map<String, Object> body) {
+        return specializationRepository.findById(id).map(sp -> {
+            if (body.containsKey("name")) sp.setName(getStr(body, "name"));
+            if (body.get("programId") != null)
+                programRepository.findById(toLong(body, "programId")).ifPresent(sp::setProgram);
+            return ResponseEntity.ok(specializationRepository.save(sp));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    @DeleteMapping("/specializations/{id}")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> deleteSpecialization(@PathVariable Long id) {
+        Specialization sp = specializationRepository.findById(id).orElse(null);
+        if (sp == null) return ResponseEntity.notFound().build();
+        // Cascade: delete all batches belonging to this specialization
+        batchRepository.findBySpecialization(sp).forEach(this::cascadeDeleteBatch);
+        // Nullify student specialization references
+        studentRepository.findAll().stream()
+                .filter(s -> sp.equals(s.getSpecialization()))
+                .forEach(s -> { s.setSpecialization(null); studentRepository.save(s); });
+        // Nullify PSO specialization references (PSOs scoped to this spec)
+        if (sp.getProgram() != null) {
+            psoRepository.findByProgram(sp.getProgram()).stream()
+                    .filter(pso -> sp.equals(pso.getSpecialization()))
+                    .forEach(pso -> { pso.setSpecialization(null); psoRepository.save(pso); });
+        }
+        specializationRepository.deleteById(id);
+        return ResponseEntity.ok(Map.of("deleted", id, "name", sp.getName()));
     }
 
     // ═══ BATCHES ═════════════════════════════════════════════════
@@ -203,10 +315,11 @@ public class AdminController {
     }
 
     @DeleteMapping("/batches/{id}")
+    @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> deleteBatch(@PathVariable Long id) {
-        if (!batchRepository.existsById(id))
-            return ResponseEntity.notFound().build();
-        batchRepository.deleteById(id);
+        Batch batch = batchRepository.findById(id).orElse(null);
+        if (batch == null) return ResponseEntity.notFound().build();
+        cascadeDeleteBatch(batch);
         return ResponseEntity.ok(Map.of("deleted", id));
     }
 
@@ -259,10 +372,11 @@ public class AdminController {
     }
 
     @DeleteMapping("/semesters/{id}")
+    @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> deleteSemester(@PathVariable Long id) {
-        if (!semesterRepository.existsById(id))
-            return ResponseEntity.notFound().build();
-        semesterRepository.deleteById(id);
+        Semester sem = semesterRepository.findById(id).orElse(null);
+        if (sem == null) return ResponseEntity.notFound().build();
+        cascadeDeleteSemester(sem);
         return ResponseEntity.ok(Map.of("deleted", id));
     }
 
@@ -323,15 +437,18 @@ public class AdminController {
                 programRepository.findById(toLong(body, "programId")).ifPresent(c::setProgram);
             if (body.get("batchId") != null)
                 batchRepository.findById(toLong(body, "batchId")).ifPresent(c::setBatch);
+            if (body.get("specializationId") != null)
+                specializationRepository.findById(toLong(body, "specializationId")).ifPresent(c::setSpecialization);
             return ResponseEntity.ok(courseRepository.save(c));
         }).orElse(ResponseEntity.notFound().build());
     }
 
     @DeleteMapping("/courses/{id}")
+    @org.springframework.transaction.annotation.Transactional
     public ResponseEntity<?> deleteCourse(@PathVariable Long id) {
-        if (!courseRepository.existsById(id))
-            return ResponseEntity.notFound().build();
-        courseRepository.deleteById(id);
+        Course c = courseRepository.findById(id).orElse(null);
+        if (c == null) return ResponseEntity.notFound().build();
+        cascadeDeleteCourse(c);
         return ResponseEntity.ok(Map.of("deleted", id));
     }
 

@@ -35,44 +35,33 @@ public class OBEDashboardController {
 
     @GetMapping("/batches")
     public ResponseEntity<?> getBatches(@RequestParam(required = false) Long programId) {
-        // Start from DB batch entities
+        // Fetch batches; filter by program when programId is provided
+        List<Batch> allBatches = (programId != null)
+            ? batchRepository.findByProgramId(programId)
+            : batchRepository.findAll();
+
         Map<Integer, Integer> startToEnd = new TreeMap<>(Comparator.reverseOrder());
-        for (Batch b : batchRepository.findAll()) {
+        Set<Integer> realBatchYears = new TreeSet<>();
+        for (Batch b : allBatches) {
             try {
                 int sy = b.getStartYear();
                 int ey; try { ey = b.getEndYear(); } catch (Exception e2) { ey = sy + 3; }
-                if (sy > 0) startToEnd.merge(sy, ey > 0 ? ey : sy + 3, (a, bv) -> Math.max(a, bv));
+                if (sy > 0) {
+                    startToEnd.merge(sy, ey > 0 ? ey : sy + 3, (a, bv) -> Math.max(a, bv));
+                    realBatchYears.add(sy);
+                }
             } catch (Exception ignored) {}
         }
 
-        // Also add virtual batches derived from actual enrollment year prefixes in the marks DB.
-        // This ensures the dropdown shows "2024-2028 Batch" even if no 2024 batch entity exists,
-        // so users can filter to see 24xx BCA/MCA students that were uploaded from the 2024-25 files.
-        if (programId != null) {
-            Program prog = programRepository.findById(programId).orElse(null);
-            if (prog != null) {
-                try {
-                    List<String> prefixes = studentRepository.findDistinctEnrollmentYearPrefixesByProgram(prog);
-                    for (String prefix : prefixes) {
-                        if (prefix == null || prefix.isBlank()) continue;
-                        int sy = 2000 + Integer.parseInt(prefix); // "23" → 2023, "24" → 2024
-                        // Determine programme duration (BTech=4yr, BCA=3yr, MCA=2yr, BSc=3yr)
-                        String progName = prog.getName() == null ? "" : prog.getName().toLowerCase();
-                        int dur = progName.contains("mca") ? 2 : (progName.contains("mtech") ? 2 : 4);
-                        startToEnd.merge(sy, sy + dur - 1, (a, bv) -> Math.max(a, bv));
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-
         List<Map<String, Object>> batches = new ArrayList<>();
-        int i = 1;
         for (Map.Entry<Integer, Integer> e : startToEnd.entrySet()) {
+            if (!realBatchYears.contains(e.getKey())) continue;
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("id", i++); m.put("year", String.valueOf(e.getKey()));
+            m.put("id", e.getKey()); m.put("year", String.valueOf(e.getKey()));
             m.put("label", e.getKey() + "-" + e.getValue() + " Batch");
             batches.add(m);
         }
+        batches.sort((a, b2) -> Integer.compare((int)b2.get("id"), (int)a.get("id")));
         return ResponseEntity.ok(batches);
     }
 
@@ -85,10 +74,39 @@ public class OBEDashboardController {
     }
 
     @GetMapping("/specializations")
-    public ResponseEntity<?> getSpecializations(@RequestParam Long programId) {
+    public ResponseEntity<?> getSpecializations(
+            @RequestParam Long programId,
+            @RequestParam(required = false) String batchYear) {
         Program prog = programRepository.findById(programId).orElse(null);
         if (prog == null) return ResponseEntity.ok(List.of());
-        return ResponseEntity.ok(specializationRepository.findByProgram(prog).stream()
+
+        List<Specialization> allSpecs = specializationRepository.findByProgram(prog);
+
+        // If batchYear is given, filter to only specializations that have a batch
+        // with that startYear (so "CS 2025" doesn't show under "2023 batch")
+        if (batchYear != null && !batchYear.isBlank()) {
+            try {
+                int year = Integer.parseInt(batchYear);
+                Set<Long> specIdsWithBatch = batchRepository.findByProgram(prog).stream()
+                        .filter(b -> b.getStartYear() != null && b.getStartYear() == year
+                                  && b.getSpecialization() != null)
+                        .map(b -> b.getSpecialization().getId())
+                        .collect(Collectors.toSet());
+                // Also include specializations whose batch startYear is <= batchYear
+                // (shared/common batches cover multiple student years)
+                // Include a spec if it has ANY batch whose startYear matches OR
+                // has no batch at all for this year (legacy data without batch-scoped specs)
+                if (!specIdsWithBatch.isEmpty()) {
+                    allSpecs = allSpecs.stream()
+                            .filter(s -> specIdsWithBatch.contains(s.getId()))
+                            .collect(Collectors.toList());
+                }
+                // If no specs match the year filter, fall back to showing all specs
+                // (avoids blank dropdown when data is partially structured)
+            } catch (NumberFormatException ignored) {}
+        }
+
+        return ResponseEntity.ok(allSpecs.stream()
                 .map(s -> { Map<String, Object> m = new LinkedHashMap<>(); m.put("id", s.getId()); m.put("name", s.getName()); return m; })
                 .collect(Collectors.toList()));
     }
@@ -101,20 +119,29 @@ public class OBEDashboardController {
         Program prog = programRepository.findById(programId).orElse(null);
         if (prog == null) return ResponseEntity.ok(List.of());
         List<Batch> batches = batchRepository.findByProgram(prog);
-        // CRITICAL: filter by specialization FIRST so we get the correct semester IDs.
-        // Each specialization has its own batch with its own semester IDs.
-        // e.g. CSE Sem1=47, FSD Sem1=27 — different batches, different IDs.
+
+        // Filter by specialization: each spec has its own batch with its own semester IDs.
         if (specializationId != null) {
-            batches = batches.stream()
+            List<Batch> specBatches = batches.stream()
                     .filter(b -> b.getSpecialization() != null && specializationId.equals(b.getSpecialization().getId()))
                     .collect(Collectors.toList());
+            if (!specBatches.isEmpty()) batches = specBatches;
         }
-        // NOTE: We do NOT filter semesters by batchYear here.
-        // All programmes use a single shared DB batch entity (e.g. startYear=2023) even
-        // when actual students enrolled in 2024. Filtering by batch.getStartYear() would
-        // wipe out all semesters for BCA/MCA/BSc when batchYear=2024 is selected.
-        // The batchYear only controls which students' marks are shown — not which
-        // courses/semesters are visible in the structural dropdowns.
+
+        // When batchYear is specified, prefer batches from that exact start year.
+        // This ensures the correct semester IDs (e.g., BCA 2025 batch sem_id=114, not BCA 2023's sem_id=42).
+        if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
+            try {
+                int fy = Integer.parseInt(batchYear);
+                List<Batch> yearBatches = batches.stream()
+                        .filter(b -> b.getStartYear() != null && b.getStartYear() == fy)
+                        .collect(Collectors.toList());
+                if (!yearBatches.isEmpty()) batches = yearBatches;
+                // If no year-specific batch exists, fall through and use all batches
+                // (preserves backward compat for BCA/MCA 2024 cohort using 2023 batch)
+            } catch (NumberFormatException ignored) {}
+        }
+
         Map<Integer, Long> semNumToId = new TreeMap<>();
         for (Batch b : batches) {
             for (Semester s : semesterRepository.findByBatch(b)) {
@@ -159,12 +186,17 @@ public class OBEDashboardController {
         int totalStudents = 0, atRiskCount = 0;
         Map<String, List<Double>> branchPoAtt = new LinkedHashMap<>(), branchPsoAtt = new LinkedHashMap<>();
 
-        // Compute year prefix from batchYear — used to filter marks to the correct batch cohort
+        // Year-prefix filtering scopes marks to the selected cohort.
+        // For BTech each batch = one enrollment year (2025 batch → "25xx" students).
+        // For BCA/MCA/BSc/MTech one DB batch may hold students from multiple enrollment
+        // years (data inconsistency), so skip the prefix filter and use specialization_id.
+        boolean isBTech = (programId != null && programRepository.findById(programId)
+                .map(p -> "BTech".equalsIgnoreCase(p.getName())).orElse(false));
         String attYearPrefix = null;
-        if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
+        if (isBTech && batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
             try {
                 int fy = Integer.parseInt(batchYear);
-                attYearPrefix = String.format("%02d", fy % 100); // 2023→"23", 2024→"24"
+                attYearPrefix = String.format("%02d", fy % 100); // any year → 2-digit prefix
             } catch (NumberFormatException ignored) {}
         }
         final String finalAttYearPrefix = attYearPrefix;
@@ -173,10 +205,10 @@ public class OBEDashboardController {
             final Long specId = specializationId;
             List<StudentMark> marks;
             if (specId != null) {
-                // Use year-aware queries to match exactly what student performance shows
+                // Primary: filter by student.specialization_id (+ year prefix only for BTech)
                 marks = new ArrayList<>(studentMarkRepository
                         .findByCourseAndSpecIdAndYear(course, specId, finalAttYearPrefix));
-                // Fallback: enrollment spec codes (year-aware)
+                // Fallback: filter by enrollment-code spec digits (catches students without spec ID set)
                 if (marks.isEmpty()) {
                     List<String> specCodes = enrollmentCodeUtil.getEnrollmentCodesForSpecId(specId);
                     if (!specCodes.isEmpty()) {
@@ -184,8 +216,8 @@ public class OBEDashboardController {
                                 .findByCourseAndEnrollmentSpecCodesAndYear(course, specCodes, finalAttYearPrefix));
                     }
                 }
-                // Last resort: all marks for the course (no year filter since spec already filters)
-                if (marks.isEmpty() && finalAttYearPrefix == null) {
+                // Last resort: all marks for the course (course is already batch+spec scoped)
+                if (marks.isEmpty()) {
                     marks = studentMarkRepository.findByCourse(course);
                 }
             } else {
@@ -330,7 +362,8 @@ public class OBEDashboardController {
             @RequestParam(required = false) Long semesterId,
             @RequestParam(required = false) Long specializationId,
             @RequestParam(required = false) Long programId,
-            @RequestParam(required = false) String batchYear) {
+            @RequestParam(required = false) String batchYear,
+            @RequestParam(required = false, defaultValue = "false") boolean includeEmpty) {
         List<Course> courses;
         if (semesterId != null && programId != null) {
             // Both program and semester specified — use combined filter to avoid cross-program course leakage
@@ -364,6 +397,7 @@ public class OBEDashboardController {
         // to any one spec, so the fallback would bleed students across specs.
         final boolean allowNullSpecCountFallback = (progEntity != null)
                 && specializationRepository.findByProgram(progEntity).size() == 1;
+        final boolean finalIncludeEmpty = includeEmpty;
 
         return ResponseEntity.ok(courses.stream()
                 .map(c -> {
@@ -395,7 +429,8 @@ public class OBEDashboardController {
                     } catch (Exception e) {
                         studentCount = studentMarkRepository.countDistinctStudentsByCourse(c);
                     }
-                    if (studentCount == 0) return null; // exclude courses with no data for this filter
+                    // Exclude courses with no marks UNLESS includeEmpty=true (used by CO-PO mapping tab)
+                    if (studentCount == 0 && !finalIncludeEmpty) return null;
                     Map<String, Object> m = new LinkedHashMap<>();
                     m.put("id", c.getId());
                     m.put("code", c.getCourseCode());
@@ -453,14 +488,15 @@ public class OBEDashboardController {
             //    When a specialization is selected but returns 0 students, we return empty —
             //    this is correct and will resolve itself once enrollment data is uploaded.
             List<StudentMark> marks;
-            // Compute year prefix once — used both in null-spec fallback and batch filter.
-            // batchYear is the full 4-digit year (e.g. "2023"); yearPrefix is the 2-digit
-            // enrollment prefix (e.g. "23") that identifies students from that batch.
+            // Only apply enrollment-year prefix filter for BTech.
+            // BCA/MCA/BSc/Mtech batches can contain students from multiple enrollment years.
+            boolean isBTechCourse = (finalCourse.getProgram() != null
+                    && "BTech".equalsIgnoreCase(finalCourse.getProgram().getName()));
             String yearPrefix = null;
-            if (batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
+            if (isBTechCourse && batchYear != null && !batchYear.isBlank() && !batchYear.equals("all")) {
                 try {
                     int fy = Integer.parseInt(batchYear);
-                    yearPrefix = String.format("%02d", fy % 100); // 2023 → "23", 2024 → "24"
+                    yearPrefix = String.format("%02d", fy % 100); // 2025 → "25"
                 } catch (NumberFormatException ignored) {}
             }
             final String finalYearPrefix = yearPrefix;
@@ -502,9 +538,21 @@ public class OBEDashboardController {
                 marks = new ArrayList<>(studentMarkRepository.findByCourseWithStudent(finalCourse));
             }
 
-            // 4. Filter by batchYear using enrollment number prefix (first 2 digits).
-            // E.g. batchYear="2023" → yearPrefix="23" → only keep students whose
-            // enrollment number starts with "23". Students with "24xx" are a different batch.
+            // Fallback #3 (cross-instance): if still empty and the course has a code,
+            // search marks across ALL course instances with the same code, filtered by spec.
+            // This handles the case where ingestion stored marks under course A even though
+            // the student belongs to course B (same code, different specialization instance).
+            if (marks.isEmpty() && finalCourse.getCourseCode() != null && !finalCourse.getCourseCode().isBlank()) {
+                if (specializationId != null) {
+                    marks = new ArrayList<>(studentMarkRepository.findByCourseCodeAndSpecId(
+                            finalCourse.getCourseCode(), specializationId));
+                } else {
+                    marks = new ArrayList<>(studentMarkRepository.findByCourseCode(
+                            finalCourse.getCourseCode()));
+                }
+            }
+
+            // Filter by enrollment year prefix — only for BTech (where batch year == enrollment year).
             if (finalYearPrefix != null) {
                 marks = marks.stream().filter(sm -> {
                     if (sm.getStudent() == null) return false;
@@ -562,20 +610,45 @@ public class OBEDashboardController {
                 coCodes = coList.stream().map(CO::getCode).collect(Collectors.toList());
             }
 
-            // 6. Pre-load QCO mappings → O(1) lookup: questionLabel.upper → coId, coId → maxMarks
-            //    NO second marks load — we reuse the already-loaded marks list.
+            // 6. Pre-load QCO mappings: fall back to any mapping for same course_code if course has none.
+            //    Use CO CODES (not CO IDs) to avoid cross-instance ID mismatches when the same
+            //    course exists for multiple specializations (e.g. 6 ENCS301 instances).
             List<QuestionCOMapping> qcoMappings = questionCOMappingRepository.findByCourseId(course.getId());
-            Map<String, Long> questionToCoId = new HashMap<>();   // UPPER(label) → coId
-            Map<Long, Double>  coMaxMarksMap  = new HashMap<>();   // coId → total max marks
-            Map<Long, String>  coIdToCode     = new HashMap<>();   // coId → coCode
-            for (CO co : coList) { if (co.getId() != null) coIdToCode.put(co.getId(), co.getCode()); }
-            for (QuestionCOMapping qm : qcoMappings) {
-                if (qm.getQuestionLabel() != null && qm.getCo() != null) {
-                    questionToCoId.put(qm.getQuestionLabel().toUpperCase(), qm.getCo().getId());
-                    coMaxMarksMap.merge(qm.getCo().getId(), qm.getMaxMarks(), Double::sum);
+            // Always also check by course_code to get the MOST COMPLETE mapping set.
+            // A specific course instance may have partial mappings (e.g. only Q1→CO1)
+            // while another instance of the same course has 7 full mappings.
+            // We pick whichever set is larger.
+            if (course.getCourseCode() != null && !course.getCourseCode().isBlank()) {
+                List<QuestionCOMapping> allMappings = questionCOMappingRepository.findByCourseCode(course.getCourseCode());
+                if (allMappings.size() > qcoMappings.size()) {
+                    qcoMappings = allMappings;
                 }
             }
-            boolean hasCOMappings = !questionToCoId.isEmpty();
+
+            // questionToCoCode: UPPER(questionLabel) → list of normalized CO codes for THIS course
+            // e.g. "Q2" → ["ENCS301-CO3"]  (could map to multiple COs in edge cases)
+            Map<String, List<String>> questionToCoCode = new HashMap<>();
+            // coCodeMaxMarks: coCode → total max marks per CO
+            Map<String, Double> coCodeMaxMarks = new HashMap<>();
+
+            for (QuestionCOMapping qm : qcoMappings) {
+                if (qm.getQuestionLabel() == null || qm.getCo() == null || qm.getCo().getCode() == null) continue;
+                // Normalize CO code to the current course's code
+                // Mapping CO code may be "ENCS301-CO2" or just "CO2"; normalize to "COURSECODE-CO#"
+                String rawCode = qm.getCo().getCode();
+                String coNum = rawCode.replaceAll("^.*?-?(CO\\d+)$", "$1"); // extract "CO2"
+                String normalizedCoCode = course.getCourseCode() + "-" + coNum; // "ENCS301-CO2"
+                String key = qm.getQuestionLabel().toUpperCase();
+                questionToCoCode.computeIfAbsent(key, k -> new ArrayList<>()).add(normalizedCoCode);
+                coCodeMaxMarks.merge(normalizedCoCode, qm.getMaxMarks(), Double::sum);
+            }
+            // Deduplicate: if a question maps to the same CO multiple times (different max marks),
+            // keep each CO once with the maximum max_marks (avoids double-counting)
+            questionToCoCode.replaceAll((q, list) -> list.stream().distinct().collect(Collectors.toList()));
+            // If Q1 maps to both CO1 AND CO2 (data inconsistency), keep both — both COs get Q1 marks.
+            // coCodeMaxMarks already has each CO's total max accumulated.
+
+            boolean hasCOMappings = !questionToCoCode.isEmpty();
 
             // 7. Load POs + CO-PO weights
             Program prog = course.getProgram();
@@ -590,7 +663,6 @@ public class OBEDashboardController {
             }
 
             // 8. Group marks by student and compute per-student CO attainment INLINE
-            //    (no second DB load, no N+1)
             Map<Long, List<StudentMark>> stMarksMap = marks.stream()
                     .collect(Collectors.groupingBy(sm -> sm.getStudent().getId()));
 
@@ -610,18 +682,20 @@ public class OBEDashboardController {
 
                 Map<String, Double> coAtt = new LinkedHashMap<>();
                 if (hasCOMappings) {
-                    // Per-CO marks from question→CO mapping
-                    Map<Long, Double> coObt = new HashMap<>();
+                    // Accumulate marks per CO code
+                    Map<String, Double> coObt = new HashMap<>();
                     for (StudentMark sm : stMarks) {
                         if (sm.getQuestion() == null) continue;
-                        Long coId = questionToCoId.get(sm.getQuestion().toUpperCase());
-                        if (coId == null) continue;
-                        coObt.merge(coId, sm.getMarks() != null ? sm.getMarks() : 0.0, Double::sum);
+                        List<String> targets = questionToCoCode.get(sm.getQuestion().toUpperCase());
+                        if (targets == null) continue;
+                        double gained = sm.getMarks() != null ? sm.getMarks() : 0.0;
+                        for (String targetCode : targets) {
+                            coObt.merge(targetCode, gained, Double::sum);
+                        }
                     }
                     for (String coCode : coCodes) {
-                        Long coId = coIdToCode.entrySet().stream().filter(e -> e.getValue().equals(coCode)).map(Map.Entry::getKey).findFirst().orElse(null);
-                        double obt = coId != null ? coObt.getOrDefault(coId, 0.0) : 0.0;
-                        double max = coId != null ? coMaxMarksMap.getOrDefault(coId, 1.0) : 1.0;
+                        double obt = coObt.getOrDefault(coCode, 0.0);
+                        double max = coCodeMaxMarks.getOrDefault(coCode, 1.0);
                         double pct = max > 0 ? r1(Math.min(100.0, obt / max * 100.0)) : 0.0;
                         row.put(coCode, pct); coAtt.put(coCode, pct);
                     }
