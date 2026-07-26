@@ -5,17 +5,16 @@
 //  🚀 PROD   : LOCAL_MODE = false  → hits Render backend URL
 // ───────────────────────────────────────────────────────────────
 
-const LOCAL_MODE = true; // ← ✅ CHANGE THIS: true = local, false = production
+// Auto-detects if running locally (localhost/127.0.0.1) vs deployed production domain
+const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-// ── 🚀 PRODUCTION URL — only used when LOCAL_MODE = false ──────
-const PROD_URL = 'https://obe-backend-qf77.onrender.com';
-// ── END PROD URL ───────────────────────────────────────────────
+// ── 🚀 PRODUCTION URL ──────────────────────────────────────────
+const PROD_URL = 'https://obe-application.onrender.com'; // or relative '' if served by Spring Boot
+// ───────────────────────────────────────────────────────────────
 
-// Resolves to '' (relative) when on port 8080, or full localhost URL
-// when using VS Code Live Server on port 5500
-const API = LOCAL_MODE
+const API = IS_LOCAL
     ? (window.location.port === '8080' ? '' : 'http://localhost:8080')
-    : PROD_URL;
+    : (window.location.port === '8080' ? '' : (window.location.origin.includes('onrender.com') || window.location.origin.includes('render') ? '' : PROD_URL));
 
 // ═══════════════════════════════════════════════════════════════
 
